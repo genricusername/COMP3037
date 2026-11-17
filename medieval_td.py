@@ -16,12 +16,18 @@ Controls
     S               sell selected tower
     F               cycle game speed (x1 / x2 / x3)
     P               pause
-    R / SPACE       restart after defeat
+    R / SPACE       restart after defeat       M   back to the main menu
+    Menu button     leave the run (click twice to confirm)
 
 UPGRADES
     Every tower has two upgrade paths with three tiers each. A path's third tier
     is only available while the other path is at tier 1 or lower, so you have to
-    commit (3/1, 2/2 or 1/3).
+    commit (3/1, 2/2 or 1/3). Some towers add their own rules: the Mage's Chain
+    Lightning replaces its fireballs, so the later fire upgrades lock out.
+
+MAPS & DIFFICULTY
+    The start screen lets you pick a map, then a difficulty (starting hearts and
+    gold). To add a map, append a dict to MAPS; to tune difficulty edit DIFFICULTIES.
 
 HOW TO ADD A NEW TOWER
     1. Subclass `Tower`, set id / name / cost / range / cooldown / damage /
@@ -57,8 +63,6 @@ SIDEBAR_W = SCREEN_W - MAP_W
 SIDEBAR_X = MAP_W
 FPS = 60
 
-START_MONEY = 350
-START_LIVES = 20
 PATH_WIDTH = 46
 SELL_REFUND = 0.7          # fraction of everything spent that is refunded on sell
 REWARD_PER_HP = 0.1        # gold per point of (unscaled) enemy HP
@@ -70,10 +74,46 @@ LOCK_TIER = 3              # tier that needs the other path at <= 1
 THORN_TICK = 0.15          # seconds between thorn damage ticks
 WEB_SLOW = 0.5             # tower attack-rate multiplier while webbed
 
-# Path the enemies walk (first point is off-screen, last is the castle gate)
-WAYPOINTS = [(-40, 100), (760, 100), (760, 260), (140, 260), (140, 420),
-             (760, 420), (760, 580), (140, 580), (140, 656)]
-CASTLE_RECT = pygame.Rect(78, 626, 124, 74)
+def castle_rect(cx):
+    return pygame.Rect(cx - 62, 626, 124, 74)
+
+
+# Every map: enemies enter off-screen on the left and walk the waypoints to the castle
+# gate, which always sits at the bottom edge (castle_x, 656). Add a dict to add a map.
+MAPS = [
+    dict(name="Heartland Road",
+         blurb="A long, lazy road winding back and forth across green farmland. Plenty of room to build.",
+         points=[(-40, 100), (760, 100), (760, 260), (140, 260), (140, 420),
+                 (760, 420), (760, 580), (140, 580), (140, 656)],
+         castle_x=140, grass=(88, 140, 70), road=(160, 122, 80), edge=(110, 80, 50),
+         leaves=((34, 92, 44), (44, 110, 54), (66, 140, 72)),
+         flowers=((240, 230, 90), (240, 240, 240), (220, 120, 180))),
+    dict(name="Serpent's Pass",
+         blurb="A shorter, twisting autumn pass through the hills. Enemies reach the gate sooner.",
+         points=[(-40, 80), (300, 80), (300, 300), (600, 300), (600, 120), (820, 120),
+                 (820, 480), (450, 480), (450, 656)],
+         castle_x=450, grass=(134, 132, 70), road=(158, 116, 82), edge=(108, 76, 52),
+         leaves=((166, 82, 32), (198, 112, 42), (224, 156, 64)),
+         flowers=((230, 120, 40), (200, 60, 40), (240, 200, 80))),
+    dict(name="Frostmere Crossing",
+         blurb="A frozen mile of sharp switchbacks. Long and winding, with the castle tucked in the south-east.",
+         points=[(-40, 560), (300, 560), (300, 380), (80, 380), (80, 150), (400, 150), (400, 300),
+                 (620, 300), (620, 100), (840, 100), (840, 500), (640, 500), (640, 656)],
+         castle_x=640, grass=(196, 212, 222), road=(150, 140, 132), edge=(100, 92, 86),
+         leaves=((46, 98, 84), (64, 122, 104), (226, 238, 244)),
+         flowers=((240, 250, 255), (170, 200, 235), (210, 225, 245))),
+]
+
+DIFFICULTIES = [
+    dict(id="easy", name="Easy", lives=40, money=650, color=(96, 160, 80),
+         blurb="Forgiving. Extra hearts and a fat purse to get your defences going."),
+    dict(id="medium", name="Medium", lives=20, money=350, color=(214, 170, 60),
+         blurb="The standard siege."),
+    dict(id="hard", name="Hard", lives=10, money=350, color=(214, 110, 50),
+         blurb="Half the hearts. Every leak hurts."),
+    dict(id="impossible", name="Impossible", lives=1, money=350, color=(190, 40, 50),
+         blurb="A single heart. One enemy through the gate and it is over."),
+]
 
 # Colours
 GRASS = (88, 140, 70)
@@ -213,9 +253,10 @@ class Effect:
 class Explosion(Effect):
     life = 0.4
 
-    def __init__(self, pos, radius):
+    def __init__(self, pos, radius, color=(255, 130, 30), rim=(255, 220, 90)):
         super().__init__()
         self.pos, self.radius = pygame.Vector2(pos), radius
+        self.color, self.rim = color, rim
 
     def draw(self, s):
         p = self.p
@@ -223,12 +264,36 @@ class Explosion(Effect):
         a = int(230 * (1 - p))
         tmp = pygame.Surface((r * 2 + 4, r * 2 + 4), pygame.SRCALPHA)
         c = r + 2
-        pygame.draw.circle(tmp, (255, 130, 30, a // 2), (c, c), r)
-        pygame.draw.circle(tmp, (255, 220, 90, a), (c, c), r, 3)
+        pygame.draw.circle(tmp, (*self.color, a // 2), (c, c), r)
+        pygame.draw.circle(tmp, (*self.rim, a), (c, c), r, 3)
         core = int(r * 0.55 * (1 - p))
         if core > 1:
             pygame.draw.circle(tmp, (255, 250, 200, a), (c, c), core)
         s.blit(tmp, (self.pos.x - c, self.pos.y - c))
+
+
+class LightningBolt(Effect):
+    """Jagged bolt of electricity running through a list of points."""
+    life = 0.3
+
+    def __init__(self, points):
+        super().__init__()
+        self.segs = []
+        for a, b in zip(points, points[1:]):
+            a, b = pygame.Vector2(a), pygame.Vector2(b)
+            v = b - a
+            if v.length() < 1:
+                continue
+            perp = pygame.Vector2(-v.y, v.x).normalize()
+            n = max(2, int(v.length() / 14))
+            pts = [a] + [a.lerp(b, i / n) + perp * random.uniform(-7, 7) for i in range(1, n)] + [b]
+            self.segs.append(pts)
+
+    def draw(self, s):
+        w = max(1, int(5 * (1 - self.p)))
+        for pts in self.segs:
+            pygame.draw.lines(s, (110, 140, 255), False, pts, w + 2)
+            pygame.draw.lines(s, (235, 245, 255), False, pts, max(1, w - 1))
 
 
 class Ring(Effect):
@@ -337,15 +402,19 @@ class FloatText(Effect):
 
 
 class ThornPatch:
-    """Thorny brambles on the road (Druid). Damages every enemy standing in it."""
+    """Brambles planted on the road ahead of time (Druid). Each tick that hurts
+    someone uses up a charge, so a patch waits patiently until enemies arrive."""
 
     def __init__(self, pos, owner):
         self.pos = pygame.Vector2(pos)
         self.owner = owner
         self.radius = owner.patch_radius
-        self.life = owner.patch_time
+        self.max_charges = self.charges = owner.patch_charges
         self.damage = owner.damage
         self.slow = owner.thorn_slow
+        self.poison = owner.thorn_poison
+        self.root = owner.root_time
+        self.rooted = set()
         self.age = 0.0
         self.timer = 0.0
         rng = random.Random(random.random())
@@ -356,8 +425,57 @@ class ThornPatch:
             self.spikes.append((bx, by, bx + rng.uniform(-5, 5), by - rng.uniform(7, 14)))
         self.vines = []
         for _ in range(5):
-            pts = [(rng.uniform(-1, 1) * self.radius * 0.8, rng.uniform(-1, 1) * self.radius * 0.7) for _ in range(3)]
-            self.vines.append(pts)
+            self.vines.append([(rng.uniform(-1, 1) * self.radius * 0.8, rng.uniform(-1, 1) * self.radius * 0.7) for _ in range(3)])
+
+    @property
+    def dead(self):
+        return self.charges <= 0
+
+    def update(self, dt, game):
+        self.age += dt
+        self.timer += dt
+        while self.timer >= THORN_TICK:
+            self.timer -= THORN_TICK
+            hit = False
+            for e in game.enemies:
+                if e.alive and e.pos.distance_to(self.pos) <= self.radius + e.radius * 0.5:
+                    hit = True
+                    e.take_damage(self.damage)
+                    if self.slow:
+                        e.apply_slow(self.slow, 0.5)
+                    if self.poison:
+                        e.apply_poison(self.poison, 3.0)
+                    if self.root and e not in self.rooted:
+                        self.rooted.add(e)
+                        e.apply_stun(self.root)
+            if hit:
+                self.charges -= 1
+
+    def draw(self, s):
+        g = min(1.0, self.age / 0.35)
+        fade = min(1.0, self.charges / (self.max_charges * 0.3))
+        r = int(self.radius * g) + 2
+        size = r * 2 + 40
+        tmp = pygame.Surface((size, size), pygame.SRCALPHA)
+        c = size // 2
+        a = int(255 * fade)
+        pygame.draw.circle(tmp, (30, 80, 35, int(95 * fade)), (c, c), r)
+        for pts in self.vines:
+            pygame.draw.lines(tmp, (40, 100, 40, a), False, [(c + x * g, c + y * g) for x, y in pts], 3)
+        for bx, by, tx, ty in self.spikes:
+            pygame.draw.line(tmp, (60, 130, 55, a), (c + bx * g, c + by * g), (c + tx * g, c + ty * g), 2)
+            pygame.draw.circle(tmp, (190, 230, 120, a), (int(c + tx * g), int(c + ty * g)), 1)
+        if self.poison:
+            pygame.draw.circle(tmp, (150, 230, 90, int(120 * fade)), (c, c), r, 2)
+        s.blit(tmp, (self.pos.x - c, self.pos.y - c))
+
+
+class FirePatch:
+    """Lingering flames left behind by Mage fireballs."""
+
+    def __init__(self, pos, radius, damage, secs, owner):
+        self.pos, self.radius, self.damage = pygame.Vector2(pos), radius, damage
+        self.life, self.age, self.timer, self.owner = secs, 0.0, 0.0, owner
 
     @property
     def dead(self):
@@ -366,30 +484,20 @@ class ThornPatch:
     def update(self, dt, game):
         self.age += dt
         self.timer += dt
-        while self.timer >= THORN_TICK:
-            self.timer -= THORN_TICK
+        while self.timer >= 0.25:
+            self.timer -= 0.25
             for e in game.enemies:
                 if e.alive and e.pos.distance_to(self.pos) <= self.radius + e.radius * 0.5:
                     e.take_damage(self.damage)
-                    if self.slow:
-                        e.apply_slow(self.slow, 0.5)
 
     def draw(self, s):
-        g = min(1.0, self.age / 0.35)
-        fade = min(1.0, (self.life - self.age) / 0.8)
-        r = int(self.radius * g) + 2
-        size = r * 2 + 40
-        tmp = pygame.Surface((size, size), pygame.SRCALPHA)
-        c = size // 2
-        a = int(255 * fade)
-        pygame.draw.circle(tmp, (30, 80, 35, int(95 * fade)), (c, c), r)
-        for pts in self.vines:
-            poly = [(c + x * g, c + y * g) for x, y in pts]
-            pygame.draw.lines(tmp, (40, 100, 40, a), False, poly, 3)
-        for bx, by, tx, ty in self.spikes:
-            pygame.draw.line(tmp, (60, 130, 55, a), (c + bx * g, c + by * g), (c + tx * g, c + ty * g), 2)
-            pygame.draw.circle(tmp, (190, 230, 120, a), (int(c + tx * g), int(c + ty * g)), 1)
-        s.blit(tmp, (self.pos.x - c, self.pos.y - c))
+        fade = min(1.0, (self.life - self.age) / 0.6)
+        for k in range(8):
+            ang, dist = k * 2.4, self.radius * 0.8 * (((k * 37) % 10) / 10)
+            fx, fy = self.pos.x + math.cos(ang) * dist, self.pos.y + math.sin(ang) * dist * 0.7
+            h = (9 + 6 * math.sin(self.age * 9 + k)) * fade
+            pygame.draw.polygon(s, (240, 90, 30), [(fx - 5, fy), (fx + 5, fy), (fx, fy - h)])
+            pygame.draw.polygon(s, (255, 210, 80), [(fx - 2.5, fy), (fx + 2.5, fy), (fx, fy - h * 0.6)])
 
 
 # =============================================================================
@@ -413,6 +521,8 @@ class Enemy:
     spawn_gap = 1.0          # multiplies the delay after this enemy spawns
     lives_cost = 1           # lives lost if it reaches the castle
     color = (200, 200, 200)  # used in UI
+    undead = False           # Crusader knights hit these harder
+    stun_scale = 1.0         # bosses shrug off part of every stun
 
     def __init__(self, path, hp_mult=1.0, speed_mult=1.0, dist=0.0):
         self.path = path
@@ -432,6 +542,9 @@ class Enemy:
         self.slow_amt = self.slow_t = 0.0
         self.vuln = self.vuln_t = 0.0
         self.burn_dps = self.burn_t = 0.0
+        self.poison_dps = self.poison_t = 0.0
+        self.stun_t = 0.0
+        self.no_heal_t = 0.0
 
     @property
     def alive(self):
@@ -462,6 +575,14 @@ class Enemy:
             self.burn_dps = dps
         self.burn_t = max(self.burn_t, secs)
 
+    def apply_poison(self, dps, secs):
+        if self.poison_t <= 0 or dps >= self.poison_dps:
+            self.poison_dps = dps
+        self.poison_t = max(self.poison_t, secs)
+
+    def apply_stun(self, secs):
+        self.stun_t = max(self.stun_t, secs * self.stun_scale)
+
     # ---- hooks --------------------------------------------------------------
     def special(self, dt, game):
         """Per-frame behaviour (regeneration, summoning, shooting webs...)."""
@@ -487,10 +608,17 @@ class Enemy:
             self.take_damage(self.burn_dps * dt)
             if self.burn_t <= 0:
                 self.burn_dps = 0.0
+        if self.poison_t > 0:
+            self.poison_t -= dt
+            self.take_damage(self.poison_dps * dt)
+            if self.poison_t <= 0:
+                self.poison_dps = 0.0
+        self.stun_t = max(0.0, self.stun_t - dt)
+        self.no_heal_t = max(0.0, self.no_heal_t - dt)
         self.special(dt, game)
         if self.hp <= 0:
             return
-        if not self.stopped:
+        if not self.stopped and self.stun_t <= 0:
             self.dist += self.move_speed * max(0.2, 1.0 - self.slow_amt) * dt
         if self.dist >= self.path.length:
             self.escaped = True
@@ -513,6 +641,12 @@ class Enemy:
             for _ in range(2):
                 pygame.draw.circle(s, (255, random.randint(100, 200), 30),
                                    (int(x + random.uniform(-r, r)), int(y - random.uniform(0, self.sprite_height * 0.7))), 2)
+        if self.poison_t > 0 and random.random() < 0.5:
+            pygame.draw.circle(s, (120, 220, 80), (int(x + random.uniform(-r, r)), int(y - random.uniform(0, self.sprite_height * 0.6))), 2)
+        if self.stun_t > 0:
+            for k in range(3):
+                a = self.anim * 8 + k * 2.09
+                pygame.draw.circle(s, (255, 235, 90), (int(x + math.cos(a) * 11), int(y - self.sprite_height - 2 + math.sin(a) * 3)), 3)
         if self.hp < self.max_hp:
             w = int(r * 2 + 10)
             bx, by = int(x - w / 2), int(y - self.sprite_height)
@@ -529,6 +663,7 @@ class Skeleton(Enemy):
     id, name = "skeleton", "Skeleton"
     base_hp, speed, radius, sprite_height = 60, 70, 11, 26
     color = (235, 230, 212)
+    undead = True
 
     def draw_sprite(self, s, x, y):
         f, t = self.facing, self.anim * 9
@@ -574,12 +709,13 @@ class Zombie(Enemy):
     id, name = "zombie", "Zombie"
     base_hp, speed, radius, sprite_height = 70, 65, 12, 28
     color = (120, 150, 110)
+    undead = True
     HEAL_DELAY = 4.0       # seconds without damage before regeneration starts
     HEAL_RATE = 0.07       # fraction of max HP regenerated per second
 
     @property
     def healing(self):
-        return self.since_damage >= self.HEAL_DELAY and self.hp < self.max_hp
+        return self.since_damage >= self.HEAL_DELAY and self.hp < self.max_hp and self.no_heal_t <= 0
 
     def special(self, dt, game):
         if self.healing:
@@ -697,6 +833,7 @@ class Necromancer(Enemy):
     id, name = "necromancer", "Necromancer"
     base_hp, speed, radius, sprite_height, spawn_gap = 110, 58, 12, 34, 2.0
     color = (110, 70, 170)
+    undead = True
     WALK_TIME = 4.5
     CAST_TIME = 2.2
     SUMMONS = 2
@@ -765,6 +902,7 @@ class Dragon(Enemy):
     id, name = "dragon", "Dragon"
     base_hp, speed, radius, sprite_height, spawn_gap = 600, 38, 20, 44, 2.2
     color = (170, 38, 38)
+    stun_scale = 0.5
 
     def draw_sprite(self, s, x, y):
         f = self.facing
@@ -791,6 +929,7 @@ class Golem(Enemy):
     id, name = "golem", "Golem"
     base_hp, speed, radius, sprite_height, spawn_gap = 1500, 26, 24, 54, 3.5
     color = (130, 124, 118)
+    stun_scale = 0.4
 
     def draw_sprite(self, s, x, y):
         t = self.anim * 3
@@ -917,10 +1056,9 @@ class Arrow(Projectile):
 
 
 class Fireball(Projectile):
-    def __init__(self, pos, target, damage, splash, burn=(0.0, 0.0)):
-        super().__init__(pos, target, damage, 270)
-        self.splash = splash
-        self.burn = burn
+    def __init__(self, pos, target, damage, splash, burn=(0.0, 0.0), scale=1.0, ground=None, owner=None, speed=270):
+        super().__init__(pos, target, damage, speed)
+        self.splash, self.burn, self.scale, self.ground, self.owner = splash, burn, scale, ground, owner
 
     def update(self, dt, game):
         super().update(dt, game)
@@ -928,7 +1066,7 @@ class Fireball(Projectile):
             game.effects.append(Particle(self.pos + (random.uniform(-3, 3), random.uniform(-3, 3)),
                                          (random.uniform(-15, 15), random.uniform(-15, 15)),
                                          random.choice([(255, 150, 40), (255, 90, 30), (255, 210, 80)]),
-                                         0.35, 5))
+                                         0.35, int(5 * self.scale)))
 
     def on_hit(self, game):
         for e in game.enemies:
@@ -941,21 +1079,47 @@ class Fireball(Projectile):
             ang = random.uniform(0, math.tau)
             game.effects.append(Particle(self.aim, (math.cos(ang) * 90, math.sin(ang) * 90),
                                          random.choice([(255, 170, 50), (255, 100, 30)]), 0.4, 4))
+        if self.ground:
+            game.patches.append(FirePatch(self.aim, self.splash * 0.75, self.ground[0], self.ground[1], self.owner))
 
     def draw(self, s):
         p = (int(self.pos.x), int(self.pos.y))
-        pygame.draw.circle(s, (230, 80, 20), p, 8)
-        pygame.draw.circle(s, (255, 170, 40), p, 6)
-        pygame.draw.circle(s, (255, 250, 190), p, 3)
+        k = self.scale
+        pygame.draw.circle(s, (230, 80, 20), p, int(8 * k))
+        pygame.draw.circle(s, (255, 170, 40), p, int(6 * k))
+        pygame.draw.circle(s, (255, 250, 190), p, int(3 * k))
+
+
+class SeedBomb(Projectile):
+    """Explosive seed pod lobbed by the Druid."""
+
+    def __init__(self, pos, target, damage, splash):
+        super().__init__(pos, target, damage, 300)
+        self.splash = splash
+
+    def on_hit(self, game):
+        for e in game.enemies:
+            if e.alive and e.pos.distance_to(self.aim) <= self.splash + e.radius:
+                e.take_damage(self.damage)
+        game.effects.append(Explosion(self.aim, self.splash, (90, 190, 70), (200, 255, 140)))
+        for _ in range(6):
+            ang = random.uniform(0, math.tau)
+            game.effects.append(Particle(self.aim, (math.cos(ang) * 70, math.sin(ang) * 70),
+                                         random.choice([(90, 190, 70), (150, 230, 100)]), 0.4, 3))
+
+    def draw(self, s):
+        p = (int(self.pos.x), int(self.pos.y))
+        pygame.draw.circle(s, (70, 50, 30), p, 6)
+        pygame.draw.circle(s, (110, 190, 80), p, 4)
 
 
 class SpellOrb(Projectile):
     """Cleric spell: 'weaken' (enemy takes more damage) or 'slow'."""
     COLORS = {"weaken": (200, 100, 235), "slow": (120, 205, 255)}
 
-    def __init__(self, pos, target, kind, amount, secs, radius):
+    def __init__(self, pos, target, kind, amount, secs, radius, owner=None):
         super().__init__(pos, target, 0, 380)
-        self.kind, self.amount, self.secs, self.radius = kind, amount, secs, radius
+        self.kind, self.amount, self.secs, self.radius, self.owner = kind, amount, secs, radius, owner
 
     def update(self, dt, game):
         super().update(dt, game)
@@ -973,6 +1137,8 @@ class SpellOrb(Projectile):
             else:
                 e.apply_slow(self.amount, self.secs)
         game.effects.append(Ring(self.aim, self.COLORS[self.kind], max(22, self.radius + 14), 0.4))
+        if self.owner:
+            self.owner.on_spell_hit(self.kind, victims, game)
 
     def draw(self, s):
         p = (int(self.pos.x), int(self.pos.y))
@@ -1022,6 +1188,7 @@ class Tower:
     cooldown = 1.0       # seconds between attacks
     damage = 10
     attacks = True       # False for pure support towers
+    needs_target = True  # False: attack() is called on cooldown even with no enemy (Druid)
     paths = ()           # two UpgradePath objects
 
     def __init__(self, pos):
@@ -1062,6 +1229,9 @@ class Tower:
         other = self.tiers[1 - i] if len(self.tiers) == 2 else 0
         if self.tiers[i] + 1 >= LOCK_TIER and other > 1:
             return False, "Locked by the other path"
+        why = self.extra_lock(i)
+        if why:
+            return False, why
         return True, ""
 
     def upgrade(self, i):
@@ -1084,7 +1254,25 @@ class Tower:
         """Called every frame before updates; support towers buff `towers` here."""
 
     def update_extra(self, dt, game):
-        """Hook for per-frame behaviour of non-attacking towers."""
+        """Hook for per-frame behaviour (support towers, passive effects)."""
+
+    def extra_lock(self, i):
+        """Return a message to forbid buying the next tier of path i, else ''."""
+        return ""
+
+    def on_spell_hit(self, kind, victims, game):
+        """Called when one of this tower's SpellOrbs lands."""
+
+    def on_enemy_death(self, enemy, game):
+        """Called for every tower whenever any enemy dies."""
+
+    def on_wave_clear(self, game):
+        """Return bonus gold paid when a wave is cleared."""
+        return 0
+
+    def reward_bonus(self, enemy):
+        """Return extra gold fraction (0.2 = +20%) for killing `enemy`."""
+        return 0.0
 
     def update(self, dt, game):
         self.flash = max(0.0, self.flash - dt)
@@ -1093,6 +1281,14 @@ class Tower:
         self.cd = max(0.0, self.cd - dt * rate)
         self.update_extra(dt, game)
         if not self.attacks:
+            return
+        if not self.needs_target:
+            if self.cd <= 0:
+                if self.attack(None, game) is not False:
+                    self.cd = self.cooldown
+                    self.flash = FLASH_TIME
+                else:
+                    self.cd = 0.3        # nothing to do right now, check again shortly
             return
         found = self.find_targets(game.enemies, 1)
         if not found:
@@ -1197,28 +1393,100 @@ class Mage(Tower):
     splash = 60
     burn_dps = 0.0
     burn_time = 3.0
-    description = "Slowly hurls fireballs that explode, burning every enemy in a circle."
+    mode = "fire"            # "fire" (fireballs) or "lightning" (chain lightning)
+    ground_fire = 0.0        # damage per tick of lingering flames (0 = off)
+    meteor_every = 0         # every Nth cast is a huge meteor (0 = off)
+    chain = 4                # lightning: enemies hit per cast
+    chain_range = 70         # lightning: max jump distance
+    chain_falloff = 0.8      # lightning: damage kept per jump
+    stun_time = 0.0          # lightning: stun on every enemy hit
+    casts = 0
+    description = ("Hurls explosive fireballs. Perfect the flame with Pyromancy, "
+                   "or swap fire for chain lightning with Stormcaller.")
     paths = (
-        UpgradePath("Firepower", [
-            U("Hotter Flames", 120, "+25% damage", damage=("*", 1.25)),
-            U("Wide Blast", 200, "+30% blast radius, +10% damage", splash=("*", 1.3), damage=("*", 1.1)),
-            U("Inferno", 380, "+30% blast, ignites enemies", splash=("*", 1.3), burn_dps=("=", 9.0)),
+        UpgradePath("Pyromancy", [
+            U("Molten Core", 120, "+30% damage. Spells ignite enemies",
+              damage=("*", 1.3), burn_dps=("=", 7.0)),
+            U("Wildfire", 220, "Fireballs leave burning ground, +25% blast",
+              ground_fire=("=", 3.0), splash=("*", 1.25)),
+            U("Meteor Storm", 420, "Every 3rd cast is a huge falling meteor",
+              meteor_every=("=", 3)),
         ]),
-        UpgradePath("Arcane Focus", [
-            U("Focus Crystal", 110, "+15% range, +15% speed", range=("*", 1.15), cooldown=("*", 0.87)),
-            U("Quickcasting", 190, "+25% attack speed", cooldown=("*", 0.8)),
-            U("Arcane Overload", 360, "+30% speed, +25% damage", cooldown=("*", 0.77), damage=("*", 1.25)),
+        UpgradePath("Stormcaller", [
+            U("Chain Lightning", 160, "SWAP: lightning replaces fireballs. Arcs through 4, casts 2x faster",
+              mode=("=", "lightning"), cooldown=("*", 0.5), damage=("*", 0.6)),
+            U("Superconductor", 260, "+4 arcs, +40% damage, longer arc reach",
+              chain=("+", 4), damage=("*", 1.4), chain_range=("*", 1.4)),
+            U("Thunder God", 450, "Bolts stun, +4 arcs, +40% damage, +20% range",
+              stun_time=("=", 0.5), chain=("+", 4), damage=("*", 1.4), range=("*", 1.2)),
         ]),
     )
 
+    def extra_lock(self, i):
+        if i == 0 and self.mode == "lightning" and self.tiers[0] >= 1:
+            return "Lightning replaced your fireballs"
+        if i == 1 and self.tiers[1] == 0 and self.tiers[0] >= 2:
+            return "Your fire upgrades would be wasted"
+        return ""
+
     def info_lines(self):
-        burn = "  Ignites" if self.burn_dps > 0 else ""
-        return [f"Damage: {self.damage:.0f}   Blast: {self.splash:.0f}", f"Range: {int(self.range)}",
-                f"Speed: {1 / self.cooldown:.1f} attacks/s{burn}"]
+        speed = f"Speed: {1 / self.cooldown:.1f} casts/s"
+        if self.mode == "lightning":
+            stun = "  Stuns" if self.stun_time else ""
+            return [f"Chain Lightning: {self.damage:.0f} x{self.chain}{stun}", f"Range: {int(self.range)}", speed]
+        extra = ("  Meteors" if self.meteor_every else "") + ("  Flames" if self.ground_fire else "") \
+            + ("  Ignites" if self.burn_dps else "")
+        return [f"Fireball: {self.damage:.0f} dmg, blast {self.splash:.0f}", f"Range: {int(self.range)}", speed + extra]
 
     def attack(self, target, game):
-        game.projectiles.append(Fireball(self.pos + (0, -34), target, self.eff_damage, self.splash,
-                                         (self.burn_dps, self.burn_time)))
+        self.casts += 1
+        if self.mode == "lightning":
+            return self.cast_lightning(target, game)
+        ground = (self.ground_fire, 3.5) if self.ground_fire > 0 else None
+        burn = (self.burn_dps, self.burn_time)
+        if self.meteor_every and self.casts % self.meteor_every == 0:
+            start = pygame.Vector2(target.pos) + (-90, -430)
+            game.projectiles.append(Fireball(start, target, self.eff_damage * 4, self.splash * 1.7, burn,
+                                             scale=2.0, ground=ground, owner=self, speed=560))
+        else:
+            game.projectiles.append(Fireball(self.pos + (0, -34), target, self.eff_damage, self.splash, burn,
+                                             ground=ground, owner=self))
+
+    def cast_lightning(self, first, game):
+        hit, cur = [first], first
+        pts = [self.pos + (0, -38), pygame.Vector2(first.pos)]
+        for _ in range(self.chain - 1):
+            nxt, best = None, self.chain_range
+            for e in game.enemies:
+                if e.alive and e not in hit:
+                    d = cur.pos.distance_to(e.pos)
+                    if d <= best:
+                        nxt, best = e, d
+            if nxt is None:
+                break
+            hit.append(nxt)
+            pts.append(pygame.Vector2(nxt.pos))
+            cur = nxt
+        for i, e in enumerate(hit):
+            e.take_damage(self.eff_damage * self.chain_falloff ** i)
+            if self.burn_dps > 0:
+                e.apply_burn(self.burn_dps, self.burn_time)
+            if self.stun_time > 0:
+                e.apply_stun(self.stun_time)
+            game.effects.append(Ring(e.pos, (140, 170, 255), 16, 0.25))
+        game.effects.append(LightningBolt(pts))
+
+    def draw(self, s):
+        super().draw(s)
+        if self.mode == "lightning":
+            cx, cy = int(self.pos.x), int(self.pos.y - 38)
+            pygame.draw.circle(s, (60, 90, 210), (cx, cy), 12)
+            pygame.draw.circle(s, (130, 170, 255), (cx, cy), 8 + (3 if self.flash > 0 else 0))
+            pygame.draw.circle(s, (240, 248, 255), (cx, cy), 4)
+            for _ in range(2):
+                a = random.uniform(0, math.tau)
+                pygame.draw.line(s, (200, 220, 255), (cx, cy),
+                                 (cx + math.cos(a) * random.uniform(10, 16), cy + math.sin(a) * random.uniform(10, 16)), 1)
 
     @classmethod
     def draw_sprite(cls, s, x, y, angle=-math.pi / 2, flash=0.0):
@@ -1242,30 +1510,69 @@ class Knight(Tower):
     id, name = "knight", "Knight"
     cost, range, cooldown, damage = 120, 85, 0.3, 7
     cleave = 1
-    description = "Strikes a single enemy with blinding speed, but only at close range."
+    undead_mult = 1.0      # damage multiplier vs undead
+    smite_every = 0        # every Nth strike calls down holy light (0 = off)
+    smite_radius = 50
+    smite_mult = 6.0
+    block_slow = 0.0       # slow applied to whatever he hits
+    bash_every = 0         # every Nth strike stuns the target (0 = off)
+    bash_time = 0.8
+    aura_slow = 0.0        # constant slow on every enemy in range
+    hits = 0
+    description = ("Strikes a single enemy with blinding speed at close range. "
+                   "Become a holy Crusader or an immovable Shield Wall.")
     paths = (
-        UpgradePath("Sharpened Steel", [
-            U("Whetstone", 80, "+40% damage", damage=("*", 1.4)),
-            U("Cleaving Blows", 140, "Hits 2 enemies, +15% damage", cleave=("=", 2), damage=("*", 1.15)),
-            U("Executioner", 260, "Hits 3 enemies, +50% damage", cleave=("=", 3), damage=("*", 1.5)),
+        UpgradePath("Crusader", [
+            U("Blessed Blade", 90, "+25% damage, double damage to undead",
+              damage=("*", 1.25), undead_mult=("=", 2.0)),
+            U("Holy Smite", 170, "Every 6th strike calls down a burst of holy light",
+              smite_every=("=", 6)),
+            U("Divine Wrath", 320, "Smite every 3rd strike, bigger burst, +40% damage",
+              smite_every=("=", 3), smite_radius=("*", 1.5), damage=("*", 1.4)),
         ]),
-        UpgradePath("Swift Guard", [
-            U("Long Reach", 70, "+20% range", range=("*", 1.2)),
-            U("Battle Rhythm", 130, "+25% attack speed", cooldown=("*", 0.8)),
-            U("Whirlwind", 250, "+30% speed, +25% range", cooldown=("*", 0.77), range=("*", 1.25)),
+        UpgradePath("Shield Wall", [
+            U("Tower Shield", 80, "Strikes slow enemies 25%, +15% range",
+              block_slow=("=", 0.25), range=("*", 1.15)),
+            U("Shield Bash", 150, "Every 5th strike stuns for 0.8s",
+              bash_every=("=", 5)),
+            U("Bulwark", 280, "Everything in range is slowed 30%. Bash every 3rd",
+              aura_slow=("=", 0.3), bash_every=("=", 3)),
         ]),
     )
 
     def info_lines(self):
-        multi = f"  ({self.cleave} targets)" if self.cleave > 1 else ""
-        return [f"Damage: {self.damage:.1f}{multi}", f"Range: {int(self.range)}",
-                f"Speed: {1 / self.cooldown:.1f} attacks/s"]
+        perks = ("  Smites" if self.smite_every else "") + ("  Bashes" if self.bash_every else "") \
+            + ("  Slows" if self.block_slow else "")
+        return [f"Damage: {self.damage:.1f}" + (f"  (x2 undead)" if self.undead_mult > 1 else ""),
+                f"Range: {int(self.range)}", f"Speed: {1 / self.cooldown:.1f} attacks/s{perks}"]
+
+    def update_extra(self, dt, game):
+        if self.aura_slow:
+            for e in game.enemies:
+                if e.alive and self.pos.distance_to(e.pos) <= self.range + e.radius:
+                    e.apply_slow(self.aura_slow, 0.3)
 
     def attack(self, target, game):
         for tgt in self.find_targets(game.enemies, self.cleave):
-            tgt.take_damage(self.eff_damage)
+            tgt.take_damage(self.eff_damage * (self.undead_mult if tgt.undead else 1.0))
+            if self.block_slow:
+                tgt.apply_slow(self.block_slow, 1.0)
             d = tgt.pos - self.pos
             game.effects.append(Slash(tgt.pos, math.atan2(d.y, d.x)))
+        self.hits += 1
+        if self.bash_every and self.hits % self.bash_every == 0:
+            target.apply_stun(self.bash_time)
+            game.effects.append(Ring(target.pos, (170, 190, 255), 22, 0.3))
+        if self.smite_every and self.hits % self.smite_every == 0:
+            for e in game.enemies:
+                if e.alive and e.pos.distance_to(target.pos) <= self.smite_radius + e.radius:
+                    e.take_damage(self.eff_damage * self.smite_mult * (self.undead_mult if e.undead else 1.0))
+            game.effects.append(Explosion(target.pos, self.smite_radius, (255, 230, 130), (255, 255, 210)))
+
+    def draw(self, s):
+        if self.aura_slow:
+            draw_range(s, self.pos, self.range, (120, 170, 255), 22)
+        super().draw(s)
 
     @classmethod
     def draw_sprite(cls, s, x, y, angle=-math.pi / 2, flash=0.0):
@@ -1292,50 +1599,88 @@ class Knight(Tower):
 class Druid(Tower):
     id, name = "druid", "Druid"
     cost, range, cooldown, damage = 160, 85, 1.8, 3      # damage = per thorn tick
+    needs_target = False         # plants brambles ahead of time, like a spike factory
     patch_radius = 32
-    patch_time = 6.0
+    patch_charges = 40           # damaging ticks a patch survives (it waits for enemies)
     max_patches = 4
     thorn_slow = 0.0
-    description = "Grows thorny brambles on the road. Small damage, but very rapid ticks to everything inside."
+    thorn_poison = 0.0
+    root_time = 0.0
+    seed_bomb = False
+    seed_damage = 14
+    seed_cooldown = 2.5
+    seed_t = 0.0
+    description = ("Grows thorny brambles on the road before enemies arrive, ready and waiting. "
+                   "Small damage, but very rapid ticks.")
     paths = (
-        UpgradePath("Thorn Mastery", [
-            U("Sharper Thorns", 90, "+50% thorn damage", damage=("*", 1.5)),
-            U("Wide Briars", 150, "+30% patch size, lasts 2s longer", patch_radius=("*", 1.3), patch_time=("+", 2.0)),
-            U("Briar Thicket", 280, "+60% damage, +2 patches", damage=("*", 1.6), max_patches=("+", 2)),
+        UpgradePath("Bramble Lore", [
+            U("Venomous Thorns", 90, "Thorns poison enemies (8 damage/s)",
+              thorn_poison=("=", 8.0)),
+            U("Briar Patch", 160, "+35% patch size, +2 patches, patches last longer",
+              patch_radius=("*", 1.35), max_patches=("+", 2), patch_charges=("*", 1.4)),
+            U("Strangleroot", 300, "Enemies entering a patch are rooted 0.8s. +50% damage",
+              root_time=("=", 0.8), damage=("*", 1.5)),
         ]),
-        UpgradePath("Verdant Growth", [
-            U("Swift Growth", 80, "Plants 25% faster", cooldown=("*", 0.8)),
-            U("Far Roots", 140, "+25% range", range=("*", 1.25)),
-            U("Entangling Roots", 260, "Thorns slow enemies by 35%", thorn_slow=("=", 0.35), cooldown=("*", 0.85)),
+        UpgradePath("Wild Heart", [
+            U("Quick Sprout", 80, "Plants 35% faster, +20% range",
+              cooldown=("*", 0.65), range=("*", 1.2)),
+            U("Seed Bombs", 170, "Also lobs explosive seed pods at enemies",
+              seed_bomb=("=", True)),
+            U("Grove Guardian", 320, "Patches slow 35%, +30% range, pods hit 2x harder and faster",
+              thorn_slow=("=", 0.35), range=("*", 1.3), seed_damage=("*", 2.0), seed_cooldown=("*", 0.6)),
         ]),
     )
 
     def info_lines(self):
-        slow = "  Slows" if self.thorn_slow > 0 else ""
-        return [f"Thorns: {self.damage:.1f} dmg / {THORN_TICK}s{slow}",
-                f"Range: {int(self.range)}   Patches: {self.max_patches}",
+        perks = ("  Poison" if self.thorn_poison else "") + ("  Root" if self.root_time else "") \
+            + ("  Slow" if self.thorn_slow else "")
+        return [f"Thorns: {self.damage:.1f} dmg every {THORN_TICK}s{perks}",
+                f"Range: {int(self.range)}   Patches: {self.max_patches}" + ("   Pods" if self.seed_bomb else ""),
                 f"Plants one every {self.cooldown:.1f}s"]
 
     def attack(self, target, game):
+        """Plant a patch on any free stretch of road in range. No enemy needed."""
         mine = [p for p in game.patches if p.owner is self and not p.dead]
         if len(mine) >= self.max_patches:
             return False
-        spot = None
-        for off in (45, 30, 15, 0):
-            p = game.path.position_at(target.dist + off)
+        road, d = [], 0.0
+        while d <= game.path.length:
+            p = game.path.position_at(d)
             if self.pos.distance_to(p) <= self.range:
-                spot = p
-                break
-        if spot is None:
-            spot = pygame.Vector2(target.pos)
-        if any(spot.distance_to(m.pos) < self.patch_radius * 0.7 for m in mine):
+                road.append(p)
+            d += 8
+        if not road:
             return False
+        # split the reachable road into evenly spaced slots; refill any empty one
+        n = max(1, self.max_patches)
+        slots = [road[min(len(road) - 1, int((i + 0.5) * len(road) / n))] for i in range(n)]
+        reach = max(4.0, 8.0 * len(road) / n * 0.5)
+        free = [p for p in slots if all(p.distance_to(m.pos) > reach for m in mine)]
+        if not free:
+            return False
+        spot = random.choice(free)
+        v = spot - self.pos
+        self.angle = math.atan2(v.y, v.x)
         game.patches.append(ThornPatch(spot, self))
         game.effects.append(Ring(spot, (90, 200, 90), self.patch_radius, 0.35))
         for _ in range(6):
             ang = random.uniform(0, math.tau)
             game.effects.append(Particle(spot, (math.cos(ang) * 50, math.sin(ang) * 50 - 20),
                                          random.choice([(70, 170, 70), (150, 220, 100)]), 0.5, 3))
+
+    def update_extra(self, dt, game):
+        if not self.seed_bomb:
+            return
+        self.seed_t -= dt * self.speed_buff
+        if self.seed_t > 0:
+            return
+        found = self.find_targets(game.enemies, 1)
+        if found:
+            v = found[0].pos - self.pos
+            self.angle = math.atan2(v.y, v.x)
+            game.projectiles.append(SeedBomb(self.pos + (0, -20), found[0], self.seed_damage * self.dmg_buff, 40))
+            self.seed_t = self.seed_cooldown
+            self.flash = FLASH_TIME
 
     @classmethod
     def draw_sprite(cls, s, x, y, angle=-math.pi / 2, flash=0.0):
@@ -1364,38 +1709,76 @@ class Bard(Tower):
     id, name = "bard", "Bard"
     cost, range, cooldown, damage = 180, 110, 1.0, 0
     attacks = False
-    buff = 1.15        # attack-speed multiplier given to towers in range
-    inspire = 1.0      # damage multiplier given to towers in range
-    description = "Doesn't fight. Plays an inspiring tune that makes nearby towers attack faster."
+    buff = 1.15          # attack-speed multiplier given to towers in range
+    inspire = 1.0        # damage multiplier given to towers in range
+    opus = False         # Magnum Opus: periodic burst of double attack speed
+    opus_cd = 4.0
+    opus_active = 0.0
+    wave_gold = 0        # gold paid when a wave is cleared
+    kill_bonus = 0.0     # extra gold on kills inside the aura
+    description = ("Doesn't fight. Plays an inspiring tune that makes nearby towers attack faster. "
+                   "Become a Maestro, or a Troubadour who fills the treasury.")
     paths = (
-        UpgradePath("Rousing Song", [
-            U("Livelier Tune", 100, "Attack speed buff +10%", buff=("+", 0.10)),
-            U("Marching Beat", 160, "Attack speed buff +10% more", buff=("+", 0.10)),
-            U("Battle Hymn", 300, "Buff +15%, allies deal +15% damage", buff=("+", 0.15), inspire=("=", 1.15)),
+        UpgradePath("Maestro", [
+            U("Rousing Chorus", 100, "Attack boost 15% -> 25%, allies deal +10% damage",
+              buff=("=", 1.25), inspire=("=", 1.10)),
+            U("Harmony", 170, "+30% aura range, attack boost up to 35%",
+              range=("*", 1.3), buff=("=", 1.35)),
+            U("Magnum Opus", 340, "Every 12s a fortissimo doubles allies' attack speed for 4s",
+              opus=("=", True)),
         ]),
-        UpgradePath("Wide Melody", [
-            U("Louder Lute", 90, "+25% aura range", range=("*", 1.25)),
-            U("Echoing Hall", 150, "+30% aura range", range=("*", 1.3)),
-            U("Anthem", 280, "+30% range, allies deal +10% damage", range=("*", 1.3), inspire=("=", 1.10)),
+        UpgradePath("Troubadour", [
+            U("Tip Jar", 90, "+30 gold at the end of every wave",
+              wave_gold=("+", 30)),
+            U("Patron's Favor", 160, "+30 gold per wave. Kills inside the aura pay +20%",
+              wave_gold=("+", 30), kill_bonus=("+", 0.20)),
+            U("Royal Minstrel", 300, "+60 gold per wave, kills pay +30% more, +20% range",
+              wave_gold=("+", 60), kill_bonus=("+", 0.30), range=("*", 1.2)),
         ]),
     )
 
     def info_lines(self):
-        extra = f"Allies deal +{(self.inspire - 1) * 100:.0f}% damage" if self.inspire > 1 else "No damage boost"
-        return [f"Allies attack +{(self.buff - 1) * 100:.0f}% faster", f"Aura range: {int(self.range)}", extra]
+        l1 = f"Allies attack +{(self.buff - 1) * 100:.0f}% faster" + \
+            (f", +{(self.inspire - 1) * 100:.0f}% dmg" if self.inspire > 1 else "")
+        l2 = f"Aura range: {int(self.range)}" + ("   Magnum Opus" if self.opus else "")
+        l3 = (f"+{self.wave_gold}g/wave, +{self.kill_bonus * 100:.0f}% kill gold"
+              if self.wave_gold or self.kill_bonus else "No economy perks")
+        return [l1, l2, l3]
 
     def apply_aura(self, towers):
+        buff = max(self.buff, 2.0) if self.opus_active > 0 else self.buff
         for t in towers:
             if t is not self and t.attacks and self.pos.distance_to(t.pos) <= self.range:
-                t.speed_buff = max(t.speed_buff, self.buff)
+                t.speed_buff = max(t.speed_buff, buff)
                 t.dmg_buff = max(t.dmg_buff, self.inspire)
 
     def update_extra(self, dt, game):
-        if random.random() < dt * 1.6:
+        if self.opus:
+            if self.opus_active > 0:
+                self.opus_active -= dt
+            else:
+                self.opus_cd -= dt
+                if self.opus_cd <= 0:
+                    self.opus_active, self.opus_cd = 4.0, 12.0
+                    game.effects.append(Ring(self.pos, GOLD, self.range, 0.9))
+                    for _ in range(10):
+                        game.effects.append(Note(self.pos + (random.uniform(-20, 20), -20)))
+        rate = 6.0 if self.opus_active > 0 else 1.6
+        if random.random() < dt * rate:
             game.effects.append(Note(self.pos + (random.uniform(-12, 12), -22),
                                      random.choice([GOLD, (255, 140, 170), (140, 220, 255)])))
         if self.flash <= 0 and random.random() < dt * 0.8:
             self.flash = FLASH_TIME
+
+    def on_wave_clear(self, game):
+        if self.wave_gold:
+            game.effects.append(FloatText(self.pos + (0, -34), f"+{self.wave_gold}", GOLD, 18))
+        return self.wave_gold
+
+    def reward_bonus(self, enemy):
+        if self.kill_bonus and self.pos.distance_to(enemy.pos) <= self.range:
+            return self.kill_bonus
+        return 0.0
 
     @classmethod
     def draw_sprite(cls, s, x, y, angle=-math.pi / 2, flash=0.0):
@@ -1423,42 +1806,88 @@ class Bard(Tower):
 class Cleric(Tower):
     id, name = "cleric", "Cleric"
     cost, range, cooldown, damage = 180, 130, 1.5, 0
-    weaken = 0.25          # extra damage enemies take from the Hex
+    weaken = 0.25          # extra damage enemies take under Hex
     weaken_time = 3.0
     slow_amount = 0.35     # fraction of speed removed by Bind
     slow_time = 2.5
-    hex_radius = 0
+    hex_radius = 0         # area of Hex / Bind (0 = single target)
     bind_radius = 0
-    description = "Doesn't damage enemies. Casts Hex (they take more damage) and Bind (they move slower)."
+    hex_spread = False     # a hexed enemy that dies passes Hex on
+    doom_blast = 0.0       # hexed enemies explode for this fraction of their max HP
+    purify = False         # cleanses webs, Bind stops zombie healing
+    freeze_every = 0       # every Nth Bind freezes enemies solid
+    freeze_time = 1.2
+    binds = 0
+    description = ("Doesn't damage enemies. Casts Hex (they take more damage) and Bind (they move slower). "
+                   "Spread curses, or lean on purifying cold.")
     paths = (
         UpgradePath("Curses", [
-            U("Lingering Hex", 100, "Hex: +10% damage taken, +1s", weaken=("+", 0.10), weaken_time=("+", 1.0)),
-            U("Spreading Doom", 170, "Hex also hits nearby enemies", hex_radius=("+", 34)),
-            U("Doom", 300, "Hex: +20% damage taken, wider", weaken=("+", 0.20), hex_radius=("+", 20)),
+            U("Spreading Hex", 100, "Hex hits nearby enemies too, +10% damage taken",
+              hex_radius=("=", 36), weaken=("+", 0.10)),
+            U("Contagion", 180, "A hexed enemy that dies passes the Hex to its neighbours",
+              hex_spread=("=", True), weaken_time=("+", 1.5)),
+            U("Mark of Doom", 340, "Hexed enemies explode on death for 30% of max HP. +15% damage taken",
+              doom_blast=("=", 0.30), weaken=("+", 0.15)),
         ]),
-        UpgradePath("Binding", [
-            U("Heavy Chains", 100, "Bind: -10% speed, +1s", slow_amount=("+", 0.10), slow_time=("+", 1.0)),
-            U("Frost Nova", 170, "Bind also hits nearby enemies", bind_radius=("+", 34)),
-            U("Deep Freeze", 300, "Bind: -20% speed, wider", slow_amount=("+", 0.20), bind_radius=("+", 20)),
+        UpgradePath("Sanctity", [
+            U("Frost Nova", 100, "Bind hits nearby enemies too, -10% speed",
+              bind_radius=("=", 36), slow_amount=("+", 0.10)),
+            U("Purifying Light", 180, "Cleanses webs from towers in range. Bind stops zombie healing",
+              purify=("=", True)),
+            U("Absolute Zero", 340, "Every 4th Bind freezes enemies solid for 1.2s. -10% speed",
+              freeze_every=("=", 4), slow_amount=("+", 0.10)),
         ]),
     )
-    last_kind = "weaken"
 
     def info_lines(self):
+        perks = (" Contagion" if self.hex_spread else "") + (" Doom" if self.doom_blast else "") \
+            + (" Purify" if self.purify else "") + (" Freeze" if self.freeze_every else "")
         return [f"Hex: +{self.weaken * 100:.0f}% damage taken ({self.weaken_time:.1f}s)",
                 f"Bind: -{self.slow_amount * 100:.0f}% speed ({self.slow_time:.1f}s)",
-                f"Range: {int(self.range)}   Casts {1 / self.cooldown:.1f}/s"]
+                f"Range: {int(self.range)}{'  ' + perks.strip() if perks else ''}"]
 
     def attack(self, target, game):
-        # cast whichever spell is running out on this target
         w = target.vuln_t if target.vuln > 0 else 0.0
-        kind = "weaken" if w <= target.slow_t else "slow"
-        self.last_kind = kind
+        kind = "weaken" if w <= target.slow_t else "slow"      # recast whichever is running out
         start = self.pos + (0, -30)
         if kind == "weaken":
-            game.projectiles.append(SpellOrb(start, target, "weaken", self.weaken, self.weaken_time, self.hex_radius))
+            game.projectiles.append(SpellOrb(start, target, "weaken", self.weaken, self.weaken_time, self.hex_radius, self))
         else:
-            game.projectiles.append(SpellOrb(start, target, "slow", self.slow_amount, self.slow_time, self.bind_radius))
+            game.projectiles.append(SpellOrb(start, target, "slow", self.slow_amount, self.slow_time, self.bind_radius, self))
+
+    def on_spell_hit(self, kind, victims, game):
+        if kind != "slow":
+            return
+        self.binds += 1
+        if self.purify:
+            for e in victims:
+                e.no_heal_t = max(e.no_heal_t, 4.0)
+        if self.freeze_every and self.binds % self.freeze_every == 0:
+            for e in victims:
+                e.apply_stun(self.freeze_time)
+                game.effects.append(Ring(e.pos, (200, 240, 255), 26, 0.5))
+
+    def update_extra(self, dt, game):
+        if self.purify:
+            for t in game.towers:
+                if t.web_time > 0 and self.pos.distance_to(t.pos) <= self.range:
+                    t.web_time = 0.0
+                    game.effects.append(Ring(t.pos, (255, 240, 170), 24, 0.4))
+
+    def on_enemy_death(self, enemy, game):
+        if enemy.vuln_t <= 0 or (not self.hex_spread and not self.doom_blast):
+            return
+        if self.pos.distance_to(enemy.pos) > self.range + 80:
+            return
+        near = [o for o in game.enemies if o is not enemy and o.alive and o.pos.distance_to(enemy.pos) <= 70]
+        if self.hex_spread:
+            for o in near:
+                o.apply_vuln(enemy.vuln, 2.5)
+                game.effects.append(Ring(o.pos, (200, 100, 235), 18, 0.35))
+        if self.doom_blast:
+            for o in near:
+                o.take_damage(enemy.max_hp * self.doom_blast)
+            game.effects.append(Explosion(enemy.pos, 55, (190, 90, 220), (240, 180, 255)))
 
     @classmethod
     def draw_sprite(cls, s, x, y, angle=-math.pi / 2, flash=0.0):
@@ -1492,13 +1921,13 @@ def stroke_path(surf, path, width, color):
         pygame.draw.circle(surf, color, p, width // 2)
 
 
-def draw_tree(s, x, y):
-    pygame.draw.ellipse(s, (60, 100, 50), (x - 20, y + 10, 40, 14))
+def draw_tree(s, x, y, leaves=((34, 92, 44), (44, 110, 54), (66, 140, 72))):
+    dark, mid, light = leaves
+    pygame.draw.ellipse(s, tuple(int(c * 0.7) for c in mid), (x - 20, y + 10, 40, 14))
     pygame.draw.rect(s, (92, 62, 36), (x - 4, y - 2, 8, 18))
-    for dx, dy, r, c in [(-9, -4, 13, (34, 92, 44)), (9, -4, 13, (34, 92, 44)),
-                         (0, -14, 15, (44, 110, 54)), (0, 0, 14, (38, 100, 48))]:
+    for dx, dy, r, c in [(-9, -4, 13, dark), (9, -4, 13, dark), (0, -14, 15, mid), (0, 0, 14, dark)]:
         pygame.draw.circle(s, c, (x + dx, y + dy), r)
-    pygame.draw.circle(s, (66, 140, 72), (x - 3, y - 16), 6)
+    pygame.draw.circle(s, light, (x - 3, y - 16), 6)
 
 
 def draw_castle(s, cx, bottom):
@@ -1523,57 +1952,62 @@ def draw_castle(s, cx, bottom):
         pygame.draw.line(s, (80, 60, 40), (cx + i * 5, bottom - 42), (cx + i * 5, bottom), 1)
 
 
-def build_background(path):
-    rng = random.Random(42)
+def shade(c, d):
+    return tuple(max(0, min(255, v + d)) for v in c)
+
+
+def build_background(path, m):
+    grass, road, edge = m["grass"], m["road"], m["edge"]
+    crect = castle_rect(m["castle_x"])
+    rng = random.Random(sum(map(ord, m["name"])))
     surf = pygame.Surface((MAP_W, SCREEN_H))
-    surf.fill(GRASS)
+    surf.fill(grass)
     for _ in range(260):
         x, y, r = rng.randint(0, MAP_W), rng.randint(0, SCREEN_H), rng.randint(18, 60)
-        d = rng.randint(-8, 8)
-        pygame.draw.circle(surf, (GRASS[0] + d, GRASS[1] + d, GRASS[2] + d), (x, y), r)
+        pygame.draw.circle(surf, shade(grass, rng.randint(-8, 8)), (x, y), r)
     for _ in range(700):
         x, y = rng.randint(0, MAP_W), rng.randint(0, SCREEN_H)
-        pygame.draw.line(surf, (64, 112, 52), (x, y), (x + rng.randint(-2, 2), y - rng.randint(3, 6)), 1)
+        pygame.draw.line(surf, shade(grass, -24), (x, y), (x + rng.randint(-2, 2), y - rng.randint(3, 6)), 1)
 
-    stroke_path(surf, path, PATH_WIDTH + 10, PATH_EDGE)
-    stroke_path(surf, path, PATH_WIDTH, PATH_COL)
+    stroke_path(surf, path, PATH_WIDTH + 10, edge)
+    stroke_path(surf, path, PATH_WIDTH, road)
     for _ in range(900):
         p = path.position_at(rng.uniform(0, path.length))
         ang, rad = rng.uniform(0, math.tau), rng.uniform(0, PATH_WIDTH * 0.42)
-        d = rng.randint(-14, 14)
-        pygame.draw.circle(surf, (PATH_COL[0] + d, PATH_COL[1] + d, PATH_COL[2] + d),
+        pygame.draw.circle(surf, shade(road, rng.randint(-14, 14)),
                            (int(p.x + math.cos(ang) * rad), int(p.y + math.sin(ang) * rad)), rng.randint(1, 3))
 
     for _ in range(40):
         x, y = rng.randint(10, MAP_W - 10), rng.randint(10, SCREEN_H - 10)
-        if path.distance_to_point((x, y)) > PATH_WIDTH / 2 + 12 and not CASTLE_RECT.collidepoint(x, y):
+        if path.distance_to_point((x, y)) > PATH_WIDTH / 2 + 12 and not crect.collidepoint(x, y):
             pygame.draw.ellipse(surf, (120, 122, 128), (x - 6, y - 3, 12, 8))
             pygame.draw.ellipse(surf, (158, 160, 166), (x - 4, y - 3, 7, 4))
     for _ in range(90):
         x, y = rng.randint(10, MAP_W - 10), rng.randint(10, SCREEN_H - 10)
-        if path.distance_to_point((x, y)) > PATH_WIDTH / 2 + 10 and not CASTLE_RECT.collidepoint(x, y):
-            pygame.draw.circle(surf, rng.choice([(240, 230, 90), (240, 240, 240), (220, 120, 180)]), (x, y), 2)
+        if path.distance_to_point((x, y)) > PATH_WIDTH / 2 + 10 and not crect.collidepoint(x, y):
+            pygame.draw.circle(surf, rng.choice(m["flowers"]), (x, y), 2)
 
     trees, tries = [], 0
-    while len(trees) < 46 and tries < 5000:
+    while len(trees) < 46 and tries < 5000:       # trees only in the margins, never blocking building space
         tries += 1
         x, y = rng.randint(10, MAP_W - 10), rng.randint(10, SCREEN_H - 10)
         if not (x < 68 or x > MAP_W - 68 or y < 42 or y > SCREEN_H - 45):
             continue
         if path.distance_to_point((x, y)) < PATH_WIDTH / 2 + 32:
             continue
-        if CASTLE_RECT.inflate(90, 90).collidepoint(x, y):
+        if crect.inflate(90, 90).collidepoint(x, y):
             continue
         if any(math.hypot(x - tx, y - ty) < 34 for tx, ty in trees):
             continue
         trees.append((x, y))
     for x, y in sorted(trees, key=lambda p: p[1]):
-        draw_tree(surf, x, y)
+        draw_tree(surf, x, y, m["leaves"])
 
-    draw_castle(surf, 140, SCREEN_H)
-    pygame.draw.line(surf, (60, 40, 30), (24, 26), (24, 72), 3)
-    pygame.draw.polygon(surf, (150, 30, 40), [(25, 28), (54, 36), (25, 46)])
-    pygame.draw.circle(surf, (235, 230, 215), (36, 37), 3)
+    draw_castle(surf, m["castle_x"], SCREEN_H)
+    top = int(path.points[0].y) - 74              # enemy spawn banner by the entrance
+    pygame.draw.line(surf, (60, 40, 30), (24, top), (24, top + 46), 3)
+    pygame.draw.polygon(surf, (150, 30, 40), [(25, top + 2), (54, top + 10), (25, top + 20)])
+    pygame.draw.circle(surf, (235, 230, 215), (36, top + 11), 3)
     return surf
 
 
@@ -1597,9 +2031,24 @@ def build_sidebar():
 class Game:
     def __init__(self, screen):
         self.screen = screen
-        self.path = Path(WAYPOINTS)
-        self.background = build_background(self.path)
+        self.map_bgs = [build_background(Path(m["points"]), m) for m in MAPS]
+        self.map_lengths = [int(Path(m["points"]).length) for m in MAPS]
+        self.thumbs = [pygame.transform.smoothscale(bg, (300, 233)) for bg in self.map_bgs]
+        self.big_thumbs = [pygame.transform.smoothscale(bg, (430, 334)) for bg in self.map_bgs]
+        self.menu_bgs = []
+        for bg in self.map_bgs:                     # blurred, darkened backdrops for the menus
+            small = pygame.transform.smoothscale(bg, (SCREEN_W // 8, SCREEN_H // 8))
+            big = pygame.transform.smoothscale(small, (SCREEN_W, SCREEN_H))
+            veil = pygame.Surface((SCREEN_W, SCREEN_H), pygame.SRCALPHA)
+            veil.fill((20, 12, 6, 140))
+            big.blit(veil, (0, 0))
+            self.menu_bgs.append(big)
         self.sidebar_bg = build_sidebar()
+        self.records = {}                           # (map index, difficulty id) -> best waves survived
+        self.scene = "maps"                         # maps | difficulty | play
+        self.menu_map = 0
+        self.diff = DIFFICULTIES[1]
+        self._load_map(0)
         self.tower_classes = list(TOWER_TYPES.values())
         self.protos = {cls.id: cls((0, 0)) for cls in self.tower_classes}   # for stat text
         self.best_survived = 0
@@ -1607,27 +2056,134 @@ class Game:
         self._build_icons()
         self.reset()
 
+    # ------------------------------------------------------------------ menus
+    def _load_map(self, idx):
+        self.map_idx = idx
+        self.map = MAPS[idx]
+        self.path = Path(self.map["points"])
+        self.background = self.map_bgs[idx]
+        self.castle_rect = castle_rect(self.map["castle_x"])
+
+    def start_game(self, map_idx, diff):
+        self._load_map(map_idx)
+        self.diff = diff
+        self.reset()
+        self.scene = "play"
+
+    def to_menu(self):
+        self.scene = "maps"
+        self.menu_confirm = 0.0
+
+    def handle_menu_event(self, e):
+        if e.type == pygame.KEYDOWN:
+            idx = e.key - pygame.K_1 if pygame.K_1 <= e.key <= pygame.K_9 else None
+            if e.key == pygame.K_ESCAPE and self.scene == "difficulty":
+                self.scene = "maps"
+            elif idx is not None and self.scene == "maps" and idx < len(MAPS):
+                self.menu_map, self.scene = idx, "difficulty"
+            elif idx is not None and self.scene == "difficulty" and idx < len(DIFFICULTIES):
+                self.start_game(self.menu_map, DIFFICULTIES[idx])
+        elif e.type == pygame.MOUSEBUTTONDOWN and e.button == 1:
+            if self.scene == "maps":
+                for i, r in enumerate(self.map_rects):
+                    if r.collidepoint(e.pos):
+                        self.menu_map, self.scene = i, "difficulty"
+                        return
+            elif self.back_rect.collidepoint(e.pos):
+                self.scene = "maps"
+            else:
+                for i, r in enumerate(self.diff_rects):
+                    if r.collidepoint(e.pos):
+                        self.start_game(self.menu_map, DIFFICULTIES[i])
+                        return
+
+    def _draw_menu(self, s, mouse):
+        hover = next((i for i, r in enumerate(self.map_rects) if r.collidepoint(mouse)), None)
+        s.blit(self.menu_bgs[hover if hover is not None else 0], (0, 0))
+        cx = SCREEN_W // 2
+        draw_text(s, "REALM DEFENDERS", 70, GOLD, (cx, 62), "center", True, True)
+        draw_text(s, "Choose your battlefield", 26, (240, 225, 190), (cx, 124), "center", False, True)
+        draw_text(s, "Hold the castle against skeletons, goblins, zombies and dragons", 17, (210, 195, 160),
+                  (cx, 154), "center")
+        for i, r0 in enumerate(self.map_rects):
+            m = MAPS[i]
+            hov = r0.collidepoint(mouse)
+            r = r0.inflate(12, 12) if hov else r0
+            pygame.draw.rect(s, (240, 222, 176) if hov else PARCHMENT, r, border_radius=12)
+            pygame.draw.rect(s, GOLD if hov else (110, 76, 38), r, 5, border_radius=12)
+            tr = pygame.Rect(r.x + (r.w - 300) // 2, r.y + 20, 300, 233)
+            s.blit(self.thumbs[i], tr)
+            pygame.draw.rect(s, (60, 40, 20), tr, 3)
+            draw_text(s, m["name"], 25, INK, (r.centerx, r.y + 268), "center", True)
+            for k, line in enumerate(wrap_text(m["blurb"], font(15), r.w - 40)[:3]):
+                draw_text(s, line, 15, (84, 62, 36), (r.x + 20, r.y + 292 + k * 19))
+            draw_text(s, f"Road length: {self.map_lengths[i]}", 14, (110, 80, 50), (r.centerx, r.bottom - 22), "center", True)
+            draw_text(s, f"[{i + 1}]", 13, (110, 80, 50), (r.right - 12, r.y + 4), "topright")
+        draw_text(s, "Click a map or press its number", 15, (210, 195, 160), (cx, SCREEN_H - 40), "center")
+
+    def _draw_difficulty(self, s, mouse):
+        i = self.menu_map
+        m = MAPS[i]
+        s.blit(self.menu_bgs[i], (0, 0))
+        draw_text(s, "Choose your difficulty", 44, GOLD, (SCREEN_W // 2, 60), "center", True, True)
+        card = pygame.Rect(60, 130, 470, 470)
+        pygame.draw.rect(s, PARCHMENT, card, border_radius=12)
+        pygame.draw.rect(s, (110, 76, 38), card, 4, border_radius=12)
+        tr = pygame.Rect(card.x + 20, card.y + 20, 430, 334)
+        s.blit(self.big_thumbs[i], tr)
+        pygame.draw.rect(s, (60, 40, 20), tr, 3)
+        draw_text(s, m["name"], 28, INK, (card.centerx, card.y + 374), "center", True)
+        for k, line in enumerate(wrap_text(m["blurb"], font(16), card.w - 40)[:3]):
+            draw_text(s, line, 16, (84, 62, 36), (card.x + 20, card.y + 396 + k * 20))
+        for j, r0 in enumerate(self.diff_rects):
+            d = DIFFICULTIES[j]
+            hov = r0.collidepoint(mouse)
+            r = r0.inflate(10, 6) if hov else r0
+            pygame.draw.rect(s, (240, 222, 176) if hov else PARCHMENT, r, border_radius=10)
+            pygame.draw.rect(s, d["color"], r, 5, border_radius=10)
+            pygame.draw.rect(s, d["color"], (r.x, r.y, 16, r.h), border_top_left_radius=10, border_bottom_left_radius=10)
+            draw_text(s, d["name"], 30, INK, (r.x + 32, r.y + 10), "topleft", True)
+            draw_heart(s, r.x + 42, r.y + 70)
+            draw_text(s, f"{d['lives']}", 22, INK, (r.x + 58, r.y + 58), "topleft", True)
+            draw_coin(s, r.x + 140, r.y + 70, 9)
+            draw_text(s, f"{d['money']}", 22, INK, (r.x + 156, r.y + 58), "topleft", True)
+            for k, line in enumerate(wrap_text(d["blurb"], font(14), 250)[:3]):
+                draw_text(s, line, 14, (84, 62, 36), (r.x + 262, r.y + 14 + k * 18))
+            best = self.records.get((i, d["id"]))
+            if best is not None:
+                draw_text(s, f"Best: {best} waves", 14, (110, 80, 50), (r.right - 14, r.bottom - 26), "topright", True)
+            draw_text(s, f"[{j + 1}]", 13, (110, 80, 50), (r.right - 12, r.y + 4), "topright")
+        self._button(s, self.back_rect, "< Back", True, self.back_rect.collidepoint(mouse), (140, 100, 50), 20)
+        draw_text(s, "Press 1-4 to choose  -  Esc to go back", 15, (210, 195, 160), (SCREEN_W // 2 + 200, SCREEN_H - 40), "center")
+
     # ------------------------------------------------------------------ setup
     def _build_layout(self):
         x0, w = SIDEBAR_X + 14, SIDEBAR_W - 28
         n = len(self.tower_classes)
         cols, gap = 2, 6
         rows = (n + cols - 1) // cols
-        top, bottom = 164, 350
+        top, bottom = 164, 332
         cw = (w - gap) // cols
         ch = min(58, (bottom - top - gap * (rows - 1)) // rows)
         self.card_rects = [pygame.Rect(x0 + (i % cols) * (cw + gap), top + (i // cols) * (ch + gap), cw, ch)
                            for i in range(n)]
         self.icon_size = min(48, ch - 8)
-        self.panel_rect = p = pygame.Rect(x0, 358, w, 240)
-        self.up_rects = [pygame.Rect(p.x + 6, p.y + 80, p.w - 12, 58),
-                         pygame.Rect(p.x + 6, p.y + 142, p.w - 12, 58)]
+        self.panel_rect = p = pygame.Rect(x0, 340, w, 258)
+        self.up_rects = [pygame.Rect(p.x + 6, p.y + 78, p.w - 12, 68),
+                         pygame.Rect(p.x + 6, p.y + 150, p.w - 12, 68)]
         self.sell_rect = pygame.Rect(p.right - 96, p.bottom - 34, 90, 26)
         self.start_rect = pygame.Rect(x0, 604, w, 40)
         half = (w - 8) // 2
         self.speed_rect = pygame.Rect(x0, 652, half, 34)
         self.pause_rect = pygame.Rect(x0 + half + 8, 652, half, 34)
-        self.restart_rect = pygame.Rect(SCREEN_W // 2 - 95, 400, 190, 52)
+        self.restart_rect = pygame.Rect(SCREEN_W // 2 - 205, 400, 190, 52)
+        self.go_menu_rect = pygame.Rect(SCREEN_W // 2 + 15, 400, 190, 52)
+        self.menu_btn_rect = pygame.Rect(SCREEN_W - 84, 48, 70, 26)
+        n, cw, gap = len(MAPS), 340, 30
+        x_start = (SCREEN_W - (n * cw + (n - 1) * gap)) // 2
+        self.map_rects = [pygame.Rect(x_start + i * (cw + gap), 190, cw, 400) for i in range(n)]
+        self.diff_rects = [pygame.Rect(570, 130 + i * 118, 570, 106) for i in range(len(DIFFICULTIES))]
+        self.back_rect = pygame.Rect(40, SCREEN_H - 66, 140, 44)
 
     def _build_icons(self):
         self.icons = {}
@@ -1637,8 +2193,9 @@ class Game:
             self.icons[cls.id] = pygame.transform.smoothscale(tmp, (self.icon_size, self.icon_size))
 
     def reset(self):
-        self.money = START_MONEY
-        self.lives = START_LIVES
+        self.money = self.diff["money"]
+        self.lives = self.diff["lives"]
+        self.menu_confirm = 0.0
         self.wave = 0
         self.state = "ready"            # ready | wave | gameover
         self.towers, self.enemies, self.projectiles, self.effects, self.patches = [], [], [], [], []
@@ -1673,7 +2230,7 @@ class Game:
             return False, "Too close to the edge."
         if self.path.distance_to_point(p) < PATH_WIDTH / 2 + 17:
             return False, "You can't build on the road!"
-        if CASTLE_RECT.inflate(30, 30).collidepoint(p):
+        if self.castle_rect.inflate(30, 30).collidepoint(p):
             return False, "That's the castle!"
         if any(p.distance_to(t.pos) < 38 for t in self.towers):
             return False, "Too close to another tower."
@@ -1734,6 +2291,8 @@ class Game:
 
     # ------------------------------------------------------------------ input
     def handle_event(self, e):
+        if self.scene != "play":
+            return self.handle_menu_event(e)
         if e.type == pygame.MOUSEBUTTONDOWN:
             self.handle_click(e.pos, e.button, bool(pygame.key.get_mods() & pygame.KMOD_SHIFT))
         elif e.type == pygame.KEYDOWN:
@@ -1743,6 +2302,8 @@ class Game:
         if self.state == "gameover":
             if key in (pygame.K_r, pygame.K_SPACE, pygame.K_RETURN):
                 self.reset()
+            elif key in (pygame.K_m, pygame.K_ESCAPE):
+                self.to_menu()
             return
         if key == pygame.K_ESCAPE:
             self.placing = self.selected_tower = None
@@ -1765,6 +2326,8 @@ class Game:
         if self.state == "gameover":
             if button == 1 and self.restart_rect.collidepoint(pos):
                 self.reset()
+            elif button == 1 and self.go_menu_rect.collidepoint(pos):
+                self.to_menu()
             return
         if button == 3:
             self.placing = self.selected_tower = None
@@ -1777,6 +2340,12 @@ class Game:
             self._click_map(pos, shift)
 
     def _click_sidebar(self, pos):
+        if self.menu_btn_rect.collidepoint(pos):          # click twice to leave a run
+            if self.menu_confirm > 0:
+                self.to_menu()
+            else:
+                self.menu_confirm = 2.5
+            return
         for i, r in enumerate(self.card_rects):
             if r.collidepoint(pos):
                 self.select_tower_type(i)
@@ -1817,7 +2386,10 @@ class Game:
 
     # ----------------------------------------------------------------- update
     def update(self, real_dt):
+        if self.scene != "play":
+            return
         self.banner_time = max(0.0, self.banner_time - real_dt)
+        self.menu_confirm = max(0.0, self.menu_confirm - real_dt)
         if self.state == "gameover" or self.paused:
             return
         dt = real_dt * self.speed
@@ -1847,19 +2419,31 @@ class Game:
             fx.update(dt)
 
         fresh, self._spawned = self._spawned, []
-        for e in self.enemies:
-            if e.escaped:
-                self.lives -= e.lives_cost
-                self.effects.append(FloatText(e.pos + (0, -20), f"-{e.lives_cost}", (240, 70, 70), 20))
-            elif e.hp <= 0:
-                self.money += e.reward
-                self.effects.append(FloatText(e.pos + (0, -18), f"+{e.reward}"))
-                for _ in range(7):
-                    ang = random.uniform(0, math.tau)
-                    sp = random.uniform(30, 90)
-                    self.effects.append(Particle(e.pos, (math.cos(ang) * sp, math.sin(ang) * sp),
-                                                 random.choice([e.color, (90, 90, 90)]), 0.5, 4))
-                fresh.extend(e.on_death(self))
+        done, again = set(), True
+        while again:                 # loop: a death can cause more deaths (explosions)
+            again = False
+            for e in list(self.enemies):
+                if e in done:
+                    continue
+                if e.escaped:
+                    done.add(e)
+                    self.lives -= e.lives_cost
+                    self.effects.append(FloatText(e.pos + (0, -20), f"-{e.lives_cost}", (240, 70, 70), 20))
+                elif e.hp <= 0:
+                    done.add(e)
+                    again = True
+                    bonus = min(0.6, sum(t.reward_bonus(e) for t in self.towers))
+                    reward = round(e.reward * (1 + bonus))
+                    self.money += reward
+                    self.effects.append(FloatText(e.pos + (0, -18), f"+{reward}", (255, 225, 110) if bonus else GOLD))
+                    for _ in range(7):
+                        ang = random.uniform(0, math.tau)
+                        sp = random.uniform(30, 90)
+                        self.effects.append(Particle(e.pos, (math.cos(ang) * sp, math.sin(ang) * sp),
+                                                     random.choice([e.color, (90, 90, 90)]), 0.5, 4))
+                    fresh.extend(e.on_death(self))
+                    for t in self.towers:
+                        t.on_enemy_death(e, self)
         self.enemies = [e for e in self.enemies if e.alive] + fresh
         self.projectiles = [p for p in self.projectiles if not p.dead]
         self.effects = [fx for fx in self.effects if not fx.dead]
@@ -1868,20 +2452,27 @@ class Game:
         if self.lives <= 0:
             self.lives = 0
             self.state = "gameover"
-            self.best_survived = max(self.best_survived, self.wave - 1)
+            key = (self.map_idx, self.diff["id"])
+            self.records[key] = max(self.records.get(key, 0), self.wave - 1)
+            self.best_survived = self.records[key]
             self.placing = self.selected_tower = None
             return
 
         if self.state == "wave" and not self.spawn_queue and not self.enemies:
             bonus = WAVE_BONUS_BASE + WAVE_BONUS_PER_WAVE * self.wave
-            self.money += bonus
+            tips = sum(t.on_wave_clear(self) for t in self.towers)
+            self.money += bonus + tips
             self.state = "ready"
-            self.show(f"Wave {self.wave} cleared!  +{bonus} gold", 3.0)
+            self.show(f"Wave {self.wave} cleared!  +{bonus} gold" + (f"  (+{tips} from minstrels)" if tips else ""), 3.0)
 
     # ------------------------------------------------------------------- draw
     def draw(self):
         s = self.screen
         mouse = pygame.mouse.get_pos()
+        if self.scene == "maps":
+            return self._draw_menu(s, mouse)
+        if self.scene == "difficulty":
+            return self._draw_difficulty(s, mouse)
         s.blit(self.background, (0, 0))
 
         for p in self.patches:
@@ -1946,6 +2537,9 @@ class Game:
         draw_banner_icon(s, lx, 122)
         draw_text(s, f"Wave {self.wave}", 20, (250, 235, 190), (lx + 20, 110), "topleft", True, True)
         draw_text(s, "~ Towers ~", 15, GOLD, (cx, 144), "midtop", True, True)
+        sure = self.menu_confirm > 0
+        self._button(s, self.menu_btn_rect, "Sure?" if sure else "Menu", True,
+                     self.menu_btn_rect.collidepoint(mouse), (170, 80, 50) if sure else (140, 100, 50), 13)
 
         hover_idx = None
         for i, cls in enumerate(self.tower_classes):
@@ -1980,18 +2574,14 @@ class Game:
                      self.pause_rect.collidepoint(mouse), (140, 100, 50), 15)
 
     def _draw_upgrade_button(self, s, rect, t, i, mouse):
-        path = t.paths[i]
-        tier = t.tiers[i]
+        path, tier = t.paths[i], t.tiers[i]
         up = t.next_upgrade(i)
         ok, why = t.can_upgrade(i)
         afford = ok and self.money >= up.cost
         accent = ACCENTS[i]
+        base = (190, 172, 134)
         if afford:
-            base = (232, 214, 168)
-            if rect.collidepoint(mouse):
-                base = (246, 232, 190)
-        else:
-            base = (190, 172, 134)
+            base = (246, 232, 190) if rect.collidepoint(mouse) else (232, 214, 168)
         pygame.draw.rect(s, base, rect, border_radius=7)
         pygame.draw.rect(s, accent, rect, 3, border_radius=7)
         pygame.draw.rect(s, accent, (rect.x, rect.y + 6, 6, rect.h - 12), border_radius=3)
@@ -2002,18 +2592,17 @@ class Game:
             pygame.draw.circle(s, (40, 26, 14), c, 6)
             pygame.draw.circle(s, accent if j < tier else (150, 134, 104), c, 4)
         if up is None:
-            draw_text(s, "Fully upgraded", 13, (90, 70, 40), (x, rect.y + 24), "topleft", True)
-            draw_text(s, path.tiers[-1].name, 12, (110, 84, 50), (x, rect.y + 40))
-        elif not ok:
-            draw_text(s, f"{up.name}", 13, (120, 96, 64), (x, rect.y + 24), "topleft", True)
-            draw_text(s, "Locked: other path is too far along", 12, (150, 50, 40), (x, rect.y + 40))
+            draw_text(s, "Fully upgraded", 13, (90, 70, 40), (x, rect.y + 22), "topleft", True)
+            note, ncol = path.tiers[-1].name, (110, 84, 50)
         else:
-            draw_text(s, up.name, 13, INK, (x, rect.y + 24), "topleft", True)
-            cc = INK if afford else (150, 40, 30)
-            tw = font(13, True).size(str(up.cost))[0]
-            draw_coin(s, rect.right - 14 - tw - 10, rect.y + 32, 6)
-            draw_text(s, str(up.cost), 13, cc, (rect.right - 10, rect.y + 24), "topright", True)
-            draw_text(s, up.desc, 12, (84, 62, 36), (x, rect.y + 40))
+            draw_text(s, up.name, 13, INK if ok else (120, 96, 64), (x, rect.y + 22), "topleft", True)
+            if ok:
+                tw = font(13, True).size(str(up.cost))[0]
+                draw_text(s, str(up.cost), 13, INK if afford else (150, 40, 30), (rect.right - 10, rect.y + 22), "topright", True)
+                draw_coin(s, rect.right - 10 - tw - 10, rect.y + 30, 6)
+            note, ncol = (up.desc, (84, 62, 36)) if ok else (why, (150, 50, 40))
+        for k, line in enumerate(wrap_text(note, font(12), rect.w - 22)[:2]):
+            draw_text(s, line, 12, ncol, (x, rect.y + 38 + k * 13))
 
     def _draw_panel(self, s, hover_idx):
         r = self.panel_rect
@@ -2031,8 +2620,8 @@ class Game:
                 self._draw_upgrade_button(s, self.up_rects[i], t, i, mouse)
             self._button(s, self.sell_rect, f"Sell  {t.sell_value}g", True,
                          self.sell_rect.collidepoint(mouse), (170, 80, 50), 13)
-            draw_text(s, "Third tier needs the other path at tier 1 or less", 10, (110, 84, 50),
-                      (x, r.bottom - 22))
+            draw_text(s, "Tier 3 needs the other", 10, (110, 84, 50), (x, r.bottom - 30))
+            draw_text(s, "path at tier 1 or less", 10, (110, 84, 50), (x, r.bottom - 18))
         elif hover_idx is not None:
             cls = self.tower_classes[hover_idx]
             proto = self.protos[cls.id]
@@ -2075,8 +2664,10 @@ class Game:
                   GOLD, (cx, 310), "center", True, True)
         draw_text(s, f"Reached wave {self.wave}  -  {len(self.towers)} towers built", 17,
                   (220, 205, 170), (cx, 348), "center", False, True)
+        draw_text(s, f"{self.map['name']}  -  {self.diff['name']}", 16, self.diff["color"], (cx, 378), "center", True, True)
         self._button(s, self.restart_rect, "Play Again", True, self.restart_rect.collidepoint(mouse), (96, 140, 70), 24)
-        draw_text(s, "or press R", 14, (200, 190, 160), (cx, 470), "center")
+        self._button(s, self.go_menu_rect, "Main Menu", True, self.go_menu_rect.collidepoint(mouse), (140, 100, 50), 24)
+        draw_text(s, "R: play again     M: main menu", 14, (200, 190, 160), (cx, 470), "center")
 
 
 # =============================================================================
