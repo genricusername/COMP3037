@@ -523,6 +523,7 @@ class Enemy:
     color = (200, 200, 200)  # used in UI
     undead = False           # Crusader knights hit these harder
     stun_scale = 1.0         # bosses shrug off part of every stun
+    turn_resist = 1.0        # multiplier on the chance to be turned by the Alchemist
 
     def __init__(self, path, hp_mult=1.0, speed_mult=1.0, dist=0.0):
         self.path = path
@@ -545,6 +546,8 @@ class Enemy:
         self.poison_dps = self.poison_t = 0.0
         self.stun_t = 0.0
         self.no_heal_t = 0.0
+        self.turned = False         # turncoat: walks back down the road fighting its old friends
+        self.turn_dmg = self.turn_splash = self.turn_cd = 0.0
 
     @property
     def alive(self):
@@ -583,6 +586,17 @@ class Enemy:
     def apply_stun(self, secs):
         self.stun_t = max(self.stun_t, secs * self.stun_scale)
 
+    def turn(self, game, dmg, splash=0.0):
+        """Turn on the horde: walk backwards along the road and attack whatever is met."""
+        if self.turned or self.hp <= 0:
+            return
+        self.turned = True
+        self.turn_dmg = dmg + self.max_hp * 0.08
+        self.turn_splash = splash
+        self.turn_cd = 0.3
+        game.effects.append(Ring(self.pos, (255, 120, 200), 26, 0.5))
+        game.effects.append(FloatText(self.pos + (0, -28), "Turncoat!", (255, 140, 210), 14))
+
     # ---- hooks --------------------------------------------------------------
     def special(self, dt, game):
         """Per-frame behaviour (regeneration, summoning, shooting webs...)."""
@@ -619,7 +633,11 @@ class Enemy:
         if self.hp <= 0:
             return
         if not self.stopped and self.stun_t <= 0:
-            self.dist += self.move_speed * max(0.2, 1.0 - self.slow_amt) * dt
+            step = self.move_speed * max(0.2, 1.0 - self.slow_amt) * dt
+            self.dist += -step if self.turned else step
+        if self.turned and self.dist <= 0:          # made it back to the start: it dies there
+            self.dist, self.hp = 0.0, 0
+            return
         if self.dist >= self.path.length:
             self.escaped = True
             return
@@ -628,6 +646,19 @@ class Enemy:
         dx = self.pos.x - old_x
         if abs(dx) > 0.01:
             self.facing = 1 if dx > 0 else -1
+        if self.turned:
+            self.turn_cd -= dt
+            if self.turn_cd <= 0:
+                foes = [o for o in game.enemies if o is not self and o.alive and not o.turned
+                        and o.pos.distance_to(self.pos) <= 38]
+                if foes:
+                    victim = min(foes, key=lambda o: o.pos.distance_to(self.pos))
+                    for o in foes:
+                        if o is victim or (self.turn_splash and o.pos.distance_to(victim.pos) <= self.turn_splash):
+                            o.take_damage(self.turn_dmg)
+                    d = victim.pos - self.pos
+                    game.effects.append(Slash(victim.pos, math.atan2(d.y, d.x)))
+                    self.turn_cd = 0.5
 
     def draw(self, s):
         x, y = self.pos
@@ -643,6 +674,9 @@ class Enemy:
                                    (int(x + random.uniform(-r, r)), int(y - random.uniform(0, self.sprite_height * 0.7))), 2)
         if self.poison_t > 0 and random.random() < 0.5:
             pygame.draw.circle(s, (120, 220, 80), (int(x + random.uniform(-r, r)), int(y - random.uniform(0, self.sprite_height * 0.6))), 2)
+        if self.turned:
+            pygame.draw.circle(s, (255, 120, 200), (int(x), int(y - self.sprite_height * 0.3)), int(r + 6), 2)
+            pygame.draw.circle(s, (255, 190, 230), (int(x), int(y - self.sprite_height - 6)), 3)
         if self.stun_t > 0:
             for k in range(3):
                 a = self.anim * 8 + k * 2.09
@@ -903,6 +937,7 @@ class Dragon(Enemy):
     base_hp, speed, radius, sprite_height, spawn_gap = 600, 38, 20, 44, 2.2
     color = (170, 38, 38)
     stun_scale = 0.5
+    turn_resist = 0.5
 
     def draw_sprite(self, s, x, y):
         f = self.facing
@@ -930,6 +965,7 @@ class Golem(Enemy):
     base_hp, speed, radius, sprite_height, spawn_gap = 1500, 26, 24, 54, 3.5
     color = (130, 124, 118)
     stun_scale = 0.4
+    turn_resist = 0.3
 
     def draw_sprite(self, s, x, y):
         t = self.anim * 3
@@ -1147,6 +1183,241 @@ class SpellOrb(Projectile):
         pygame.draw.circle(s, (255, 255, 255), p, 3)
 
 
+class Shell(Projectile):
+    """Generic round: a bullet (splash 0) or an explosive shell (splash > 0)."""
+
+    def __init__(self, pos, target, damage, splash, speed, col, rim, blast=(255, 140, 40), size=4,
+                 slow=(0.0, 0.0), cluster=0):
+        super().__init__(pos, target, damage, speed)
+        self.splash, self.col, self.rim, self.blast, self.size = splash, col, rim, blast, size
+        self.slow, self.cluster = slow, cluster
+
+    def update(self, dt, game):
+        super().update(dt, game)
+        if self.size >= 5 and random.random() < 0.5:
+            game.effects.append(Particle(self.pos, (0, 0), self.rim, 0.25, 2))
+
+    def _blast(self, game, centre, radius, dmg):
+        for e in game.enemies:
+            if e.alive and not e.turned and e.pos.distance_to(centre) <= radius + e.radius:
+                e.take_damage(dmg)
+                if self.slow[0]:
+                    e.apply_slow(*self.slow)
+        game.effects.append(Explosion(centre, radius, self.blast, self.rim))
+
+    def on_hit(self, game):
+        if self.splash > 0:
+            self._blast(game, self.aim, self.splash, self.damage)
+        elif self.target.alive:
+            self.target.take_damage(self.damage)
+            game.effects.append(Particle(self.aim, (0, -20), self.rim, 0.2, 3))
+        for _ in range(self.cluster):
+            off = pygame.Vector2(1, 0).rotate(random.uniform(0, 360)) * random.uniform(40, 70)
+            self._blast(game, self.aim + off, self.splash * 0.6, self.damage * 0.6)
+
+    def draw(self, s):
+        p = (int(self.pos.x), int(self.pos.y))
+        pygame.draw.circle(s, self.col, p, self.size)
+        pygame.draw.circle(s, self.rim, p, max(1, self.size - 2))
+
+
+class Potion(Projectile):
+    """Alchemist's flask: splashes, then leaves a poison cloud."""
+
+    def __init__(self, pos, target, owner):
+        super().__init__(pos, target, owner.eff_damage, 330)
+        self.owner, self.spin = owner, random.uniform(0, 6)
+
+    def update(self, dt, game):
+        super().update(dt, game)
+        self.spin += dt * 12
+
+    def on_hit(self, game):
+        o = self.owner
+        for e in game.enemies:
+            if e.alive and not e.turned and e.pos.distance_to(self.aim) <= o.splash + e.radius:
+                e.take_damage(self.damage)
+        cloud = PoisonCloud(self.aim, o)
+        game.patches.append(cloud)
+        cloud.tick(game)
+        for _ in range(8):
+            ang = random.uniform(0, math.tau)
+            game.effects.append(Particle(self.aim, (math.cos(ang) * 60, math.sin(ang) * 60 - 20),
+                                         random.choice(cloud.colors), 0.5, 4))
+
+    def draw(self, s):
+        x, y = self.pos
+        a = self.spin
+        pygame.draw.circle(s, (70, 40, 20), (int(x), int(y)), 7)
+        pygame.draw.circle(s, self.owner.potion_color, (int(x), int(y)), 5)
+        nx, ny = x + math.cos(a) * 8, y + math.sin(a) * 8
+        pygame.draw.line(s, (200, 200, 210), (x, y), (nx, ny), 3)
+        pygame.draw.circle(s, (150, 100, 60), (int(nx), int(ny)), 2)
+
+
+class PoisonCloud:
+    """Lingering poison. Every tick poisons everyone inside; may turn them traitor."""
+    TICK = 0.4
+
+    def __init__(self, pos, owner):
+        self.pos, self.owner = pygame.Vector2(pos), owner
+        self.radius, self.life = owner.cloud_radius, owner.cloud_time
+        self.age = self.timer = 0.0
+        self.colors = [(190, 80, 210), (230, 130, 240)] if owner.turn_chance > 0 else [(90, 200, 70), (150, 235, 90)]
+        self.bubbles = [(random.uniform(0, math.tau), random.random(), random.uniform(0, 6)) for _ in range(12)]
+
+    @property
+    def dead(self):
+        return self.age >= self.life
+
+    def tick(self, game):
+        o = self.owner
+        for e in game.enemies:
+            if e.alive and not e.turned and e.pos.distance_to(self.pos) <= self.radius + e.radius * 0.5:
+                e.apply_poison(o.poison_dps, 2.0)
+                if o.acid:
+                    e.apply_vuln(o.acid, 1.5)
+                if o.turn_chance and random.random() < o.turn_chance * e.turn_resist:
+                    e.turn(game, o.turn_damage, o.turn_splash)
+
+    def update(self, dt, game):
+        self.age += dt
+        self.timer += dt
+        while self.timer >= self.TICK:
+            self.timer -= self.TICK
+            self.tick(game)
+
+    def draw(self, s):
+        fade = min(1.0, (self.life - self.age) / 0.7) * min(1.0, self.age / 0.2)
+        r = int(self.radius)
+        tmp = pygame.Surface((r * 2 + 8, r * 2 + 8), pygame.SRCALPHA)
+        c = r + 4
+        base = self.colors[0]
+        pygame.draw.circle(tmp, (*base, int(85 * fade)), (c, c), r)
+        pygame.draw.circle(tmp, (*self.colors[1], int(150 * fade)), (c, c), r, 2)
+        for ang, rad, ph in self.bubbles:
+            by = (self.age * 0.8 + ph) % 1.0
+            bx, byy = c + math.cos(ang) * rad * r * 0.8, c + math.sin(ang) * rad * r * 0.6 - by * 12
+            pygame.draw.circle(tmp, (*self.colors[1], int(170 * fade * (1 - by))), (int(bx), int(byy)), 2 + int(rad * 2))
+        s.blit(tmp, (self.pos.x - c, self.pos.y - c))
+
+
+def find_build_spot(game, centre, rmin, rmax, avoid=(), tries=60):
+    """Random free grass spot near `centre`, preferring spots close to the road."""
+    best, best_score = None, 1e9
+    for _ in range(tries):
+        p = pygame.Vector2(centre) + pygame.Vector2(1, 0).rotate(random.uniform(0, 360)) * random.uniform(rmin, rmax)
+        if not (20 <= p.x <= MAP_W - 20 and 20 <= p.y <= SCREEN_H - 20):
+            continue
+        road = game.path.distance_to_point(p)
+        if road < PATH_WIDTH / 2 + 8 or game.castle_rect.inflate(30, 30).collidepoint(p):
+            continue
+        if any(p.distance_to(t.pos) < 26 for t in game.towers) or any(p.distance_to(o.pos) < 24 for o in avoid):
+            continue
+        if road < best_score:
+            best, best_score = p, road
+    return best
+
+
+class Turret:
+    """Gun emplacement built by an Artificer. Fires on its own with the Artificer's stats."""
+
+    def __init__(self, pos, owner):
+        self.pos, self.owner = pygame.Vector2(pos), owner
+        self.cd, self.angle, self.flash, self.age, self.gone = random.uniform(0.0, 0.4), -math.pi / 2, 0.0, 0.0, False
+
+    @property
+    def dead(self):
+        return self.gone
+
+    def update(self, dt, game):
+        self.age += dt
+        self.flash = max(0.0, self.flash - dt)
+        o = self.owner
+        if o not in game.towers or o.mode != "turrets":        # sold, or swapped for the mortar
+            self.gone = True
+            game.effects.append(Ring(self.pos, (170, 170, 180), 18, 0.35))
+            return
+        self.cd = max(0.0, self.cd - dt * o.speed_buff)
+        if self.cd > 0:
+            return
+        found = [e for e in game.enemies if e.hp > 0 and not e.turned
+                 and self.pos.distance_to(e.pos) <= o.turret_range + e.radius]
+        if not found:
+            return
+        t = max(found, key=lambda e: e.dist)
+        v = t.pos - self.pos
+        self.angle = math.atan2(v.y, v.x)
+        muzzle = self.pos + (0, -2) + pygame.Vector2(math.cos(self.angle), math.sin(self.angle)) * 14
+        game.projectiles.append(Shell(muzzle, t, o.turret_damage * o.dmg_buff, o.turret_splash, 640,
+                                      (250, 220, 90), (255, 250, 200), blast=(255, 190, 70), size=3))
+        self.cd, self.flash = o.turret_cooldown, 0.1
+
+    def draw(self, s):
+        x, y = self.pos
+        pygame.draw.ellipse(s, (40, 70, 36), (x - 13, y + 3, 26, 9))
+        for dx in (-8, 8):
+            pygame.draw.line(s, (70, 60, 50), (x, y), (x + dx, y + 8), 3)
+        pygame.draw.circle(s, (96, 100, 112), (int(x), int(y - 2)), 8)
+        pygame.draw.circle(s, (176, 130, 60), (int(x), int(y - 2)), 8, 2)
+        d = pygame.Vector2(math.cos(self.angle), math.sin(self.angle))
+        tip = pygame.Vector2(x, y - 2) + d * 15
+        pygame.draw.line(s, (60, 62, 72), (x, y - 2), tip, 5)
+        pygame.draw.line(s, (176, 130, 60), tip - d * 4, tip, 6)
+        if self.flash > 0:
+            pygame.draw.circle(s, (255, 230, 120), (int(tip.x + d.x * 5), int(tip.y + d.y * 5)), 5)
+
+
+class Mortar:
+    """Magic mortar that replaces an Artificer's turrets: long range, big arcane blasts."""
+
+    def __init__(self, pos, owner):
+        self.pos, self.owner = pygame.Vector2(pos), owner
+        self.cd, self.angle, self.flash, self.age, self.gone = 1.0, 0.0, 0.0, 0.0, False
+
+    @property
+    def dead(self):
+        return self.gone
+
+    def update(self, dt, game):
+        self.age += dt
+        self.flash = max(0.0, self.flash - dt)
+        o = self.owner
+        if o not in game.towers:                               # sold
+            self.gone = True
+            game.effects.append(Ring(self.pos, (170, 110, 235), 22, 0.4))
+            return
+        self.cd = max(0.0, self.cd - dt * o.speed_buff)
+        if self.cd > 0:
+            return
+        found = [e for e in game.enemies if e.hp > 0 and not e.turned
+                 and 45 <= self.pos.distance_to(e.pos) <= o.mortar_range]
+        if not found:
+            return
+        # aim for the biggest crowd
+        t = max(found, key=lambda e: (sum(1 for q in found if q.pos.distance_to(e.pos) <= o.mortar_splash), e.dist))
+        self.angle = math.atan2(t.pos.y - self.pos.y, t.pos.x - self.pos.x)
+        game.projectiles.append(Shell(self.pos + (0, -16), t, o.mortar_damage * o.dmg_buff, o.mortar_splash, 380,
+                                      (150, 80, 220), (235, 200, 255), blast=(150, 80, 220), size=7,
+                                      slow=(o.mortar_slow, 2.0) if o.mortar_slow else (0.0, 0.0), cluster=o.cluster))
+        self.cd, self.flash = o.mortar_cooldown, 0.2
+
+    def draw(self, s):
+        x, y = self.pos
+        side = 1 if math.cos(self.angle) >= 0 else -1
+        pygame.draw.ellipse(s, (40, 70, 36), (x - 19, y + 2, 38, 13))
+        pygame.draw.ellipse(s, (112, 112, 126), (x - 16, y - 4, 32, 15))
+        pygame.draw.ellipse(s, (150, 150, 164), (x - 16, y - 4, 32, 8))
+        base = pygame.Vector2(x, y - 2)
+        tip = base + pygame.Vector2(side * 9, -17)
+        pygame.draw.line(s, (64, 56, 92), base, tip, 12)
+        pygame.draw.circle(s, (150, 90, 220), (int(tip.x), int(tip.y)), 7, 3)
+        pulse = 0.5 + 0.5 * math.sin(self.age * 4)
+        pygame.draw.circle(s, (170, 110, 235), (int(x), int(y + 3)), 3 + int(pulse * 2))
+        if self.flash > 0:
+            pygame.draw.circle(s, (240, 200, 255), (int(tip.x), int(tip.y - 4)), 9)
+
+
 # =============================================================================
 # UPGRADES
 # =============================================================================
@@ -1246,7 +1517,7 @@ class Tower:
     def find_targets(self, enemies, n=1):
         """Up to n enemies in range, furthest along the path first."""
         found = [e for e in enemies
-                 if e.hp > 0 and self.pos.distance_to(e.pos) <= self.range + e.radius]
+                 if e.hp > 0 and not e.turned and self.pos.distance_to(e.pos) <= self.range + e.radius]
         found.sort(key=lambda e: -e.dist)
         return found[:n]
 
@@ -1910,6 +2181,192 @@ class Cleric(Tower):
         pygame.draw.circle(s, (255, 255, 235), (int(x + 13), int(y - 18)), max(2, r - 2))
 
 
+@register_tower
+class Artificer(Tower):
+    id, name = "artificer", "Artificer"
+    cost, range, cooldown, damage = 220, 125, 1.9, 11     # damage = small grenade
+    splash = 36
+    mode = "turrets"             # "turrets" or "mortar"
+    max_turrets = 2
+    turret_damage = 6
+    turret_cooldown = 0.55
+    turret_range = 105
+    turret_splash = 0
+    build_time = 5.0             # seconds between building turrets
+    build_t = 1.5
+    mortar_damage = 48
+    mortar_splash = 52
+    mortar_range = 260
+    mortar_cooldown = 2.8
+    mortar_slow = 0.0
+    cluster = 0
+    mortar_built = False
+    description = ("Builds auto-firing turrets while lobbing small grenades. Upgrade the turrets, "
+                   "or scrap them for a long-range magic mortar.")
+    paths = (
+        UpgradePath("Engineering", [
+            U("Reinforced Turrets", 130, "+1 turret, turrets deal +50% damage, grenades +25%",
+              max_turrets=("+", 1), turret_damage=("*", 1.5), damage=("*", 1.25)),
+            U("Rapid Repeaters", 220, "Turrets fire 60% faster, +25% range, build faster",
+              turret_cooldown=("*", 0.62), turret_range=("*", 1.25), build_time=("*", 0.6)),
+            U("Autocannons", 400, "+1 turret, turrets deal 2x damage with explosive shells",
+              max_turrets=("+", 1), turret_damage=("*", 2.0), turret_splash=("=", 34)),
+        ]),
+        UpgradePath("Arcane Artillery", [
+            U("Magic Mortar", 240, "SWAP: turrets are scrapped for a long-range magic mortar",
+              mode=("=", "mortar")),
+            U("Runic Shells", 300, "Mortar +40% damage, +25% blast, shells slow enemies 35%",
+              mortar_damage=("*", 1.4), mortar_splash=("*", 1.25), mortar_slow=("=", 0.35)),
+            U("Cluster Barrage", 480, "Shells burst into 3 extra blasts, +20% fire rate",
+              cluster=("=", 3), mortar_cooldown=("*", 0.8)),
+        ]),
+    )
+
+    def extra_lock(self, i):
+        if i == 0 and self.mode == "mortar" and self.tiers[0] >= 1:
+            return "The mortar replaced your turrets"
+        if i == 1 and self.tiers[1] == 0 and self.tiers[0] >= 2:
+            return "Your turret upgrades would be wasted"
+        return ""
+
+    def info_lines(self):
+        l1 = f"Grenade: {self.damage:.0f} dmg, blast {self.splash:.0f}"
+        if self.mode == "mortar":
+            return [l1, f"Mortar: {self.mortar_damage:.0f} dmg, blast {self.mortar_splash:.0f}"
+                        + ("  Cluster" if self.cluster else ""),
+                    f"Mortar range {int(self.mortar_range)}   {1 / self.mortar_cooldown:.1f}/s"]
+        return [l1, f"Turrets: up to {self.max_turrets}, {self.turret_damage:.0f} dmg, {1 / self.turret_cooldown:.1f}/s"
+                    + ("  Explosive" if self.turret_splash else ""),
+                f"Range: {int(self.range)}   Turret range {int(self.turret_range)}"]
+
+    def attack(self, target, game):
+        game.projectiles.append(Shell(self.pos + (0, -18), target, self.eff_damage, self.splash, 300,
+                                      (80, 82, 92), (255, 170, 60), blast=(255, 150, 50), size=5))
+
+    def update_extra(self, dt, game):
+        if self.mode == "mortar":
+            if not self.mortar_built:
+                self.mortar_built = True
+                spot = find_build_spot(game, self.pos, 28, 52) or (self.pos + (30, 6))
+                game.patches.append(Mortar(spot, self))
+                game.effects.append(Ring(spot, (170, 110, 235), 34, 0.6))
+                game.effects.append(FloatText(spot + (0, -24), "Magic Mortar!", (200, 150, 255), 15))
+            return
+        mine = [p for p in game.patches if isinstance(p, Turret) and p.owner is self and not p.dead]
+        if len(mine) >= self.max_turrets:
+            return
+        self.build_t -= dt * self.speed_buff
+        if self.build_t > 0:
+            return
+        spot = find_build_spot(game, self.pos, 30, 80, mine)
+        if spot is None:
+            self.build_t = 1.0
+            return
+        game.patches.append(Turret(spot, self))
+        game.effects.append(Ring(spot, (200, 170, 90), 20, 0.4))
+        for _ in range(5):
+            ang = random.uniform(0, math.tau)
+            game.effects.append(Particle(spot, (math.cos(ang) * 40, math.sin(ang) * 40 - 15),
+                                         random.choice([(200, 170, 90), (150, 150, 160)]), 0.4, 3))
+        self.build_t = self.build_time
+
+    @classmethod
+    def draw_sprite(cls, s, x, y, angle=-math.pi / 2, flash=0.0):
+        pygame.draw.ellipse(s, (50, 80, 40), (x - 19, y + 8, 38, 14))
+        pygame.draw.ellipse(s, (96, 86, 78), (x - 18, y + 5, 36, 16))
+        pygame.draw.ellipse(s, (140, 126, 112), (x - 16, y + 5, 32, 9))
+        pygame.draw.rect(s, (112, 76, 42), (x - 15, y - 6, 10, 15), border_radius=3)
+        gx, gy = x - 10, y - 11
+        rot = pygame.time.get_ticks() / 400
+        for k in range(6):
+            a = rot + k * math.pi / 3
+            pygame.draw.line(s, (200, 160, 70), (gx, gy), (gx + math.cos(a) * 8, gy + math.sin(a) * 8), 2)
+        pygame.draw.circle(s, (176, 134, 56), (int(gx), int(gy)), 5)
+        pygame.draw.circle(s, (80, 56, 30), (int(gx), int(gy)), 2)
+        pygame.draw.polygon(s, (150, 92, 48), [(x - 8, y + 12), (x + 8, y + 12), (x + 5, y - 5), (x - 5, y - 5)])
+        pygame.draw.line(s, (60, 40, 24), (x - 7, y + 6), (x + 7, y + 6), 2)
+        pygame.draw.circle(s, (238, 204, 164), (int(x), int(y - 9)), 6)
+        pygame.draw.polygon(s, (90, 60, 36), [(x - 7, y - 12), (x + 7, y - 12), (x + 4, y - 20), (x - 4, y - 20)])
+        for gxo in (-3, 3):
+            pygame.draw.circle(s, (210, 170, 70), (int(x + gxo), int(y - 10)), 3)
+            pygame.draw.circle(s, (150, 220, 255), (int(x + gxo), int(y - 10)), 2)
+        d = pygame.Vector2(math.cos(angle), math.sin(angle))
+        hand = pygame.Vector2(x, y - 2) + d * (11 if flash <= 0 else 15)
+        pygame.draw.line(s, (238, 204, 164), (x, y - 2), hand, 3)
+        pygame.draw.circle(s, (60, 62, 70), (int(hand.x), int(hand.y)), 4)
+        pygame.draw.circle(s, (255, 190, 70), (int(hand.x), int(hand.y) - 5), 2)
+
+
+@register_tower
+class Alchemist(Tower):
+    id, name = "alchemist", "Alchemist"
+    cost, range, cooldown, damage = 230, 130, 1.7, 12     # damage = direct splash of the flask
+    splash = 34
+    poison_dps = 9.0
+    cloud_radius = 40
+    cloud_time = 3.0
+    acid = 0.0                   # enemies in the cloud take this much extra damage
+    turn_chance = 0.0            # chance per cloud tick (0.4s) that an enemy turns traitor
+    turn_damage = 8.0
+    turn_splash = 0
+    potion_color = (110, 220, 110)
+    description = ("Throws potion flasks that burst into poison clouds. Brew them stronger, "
+                   "or twist enemy minds so some turn on their own side.")
+    paths = (
+        UpgradePath("Potent Brews", [
+            U("Concentrated Toxin", 120, "+50% poison, +20% cloud size, +30% flask damage",
+              poison_dps=("*", 1.5), cloud_radius=("*", 1.2), damage=("*", 1.3)),
+            U("Corrosive Acid", 210, "Enemies in the cloud take +20% damage. Throws 25% faster",
+              acid=("=", 0.2), cooldown=("*", 0.8)),
+            U("Death Cloud", 400, "Poison x2, clouds last 2x longer and are 25% bigger",
+              poison_dps=("*", 2.0), cloud_time=("*", 2.0), cloud_radius=("*", 1.25), damage=("*", 1.5)),
+        ]),
+        UpgradePath("Mind-Bending Mixtures", [
+            U("Hallucinogen", 130, "Poisoned enemies may turn traitor: walk back and fight. +15% range",
+              turn_chance=("=", 0.05), range=("*", 1.15), potion_color=("=", (220, 110, 230))),
+            U("Berserk Serum", 220, "Turn chance 10%, turncoats hit 2x harder, clouds last 1s longer",
+              turn_chance=("=", 0.10), turn_damage=("*", 2.0), cloud_time=("+", 1.0)),
+            U("Mass Mutiny", 420, "Turn chance 16%, turncoats strike in an area, throws 15% faster",
+              turn_chance=("=", 0.16), turn_splash=("=", 40), turn_damage=("*", 1.5), cooldown=("*", 0.85)),
+        ]),
+    )
+
+    def info_lines(self):
+        l3 = f"Range: {int(self.range)}"
+        if self.turn_chance:
+            l3 += f"   Turncoat {self.turn_chance * 100:.0f}% per tick"
+        return [f"Flask: {self.damage:.0f} dmg + {self.poison_dps:.0f} poison/s",
+                f"Cloud: radius {int(self.cloud_radius)}, {self.cloud_time:.1f}s"
+                + (f"  +{self.acid * 100:.0f}% dmg" if self.acid else ""), l3]
+
+    def attack(self, target, game):
+        game.projectiles.append(Potion(self.pos + (0, -22), target, self))
+
+    @classmethod
+    def draw_sprite(cls, s, x, y, angle=-math.pi / 2, flash=0.0):
+        t = pygame.time.get_ticks()
+        pygame.draw.ellipse(s, (50, 80, 40), (x - 19, y + 8, 38, 14))
+        pygame.draw.ellipse(s, (38, 38, 46), (x - 16, y + 4, 32, 17))
+        pygame.draw.ellipse(s, (70, 70, 80), (x - 16, y + 4, 32, 17), 2)
+        pygame.draw.ellipse(s, (96, 214, 96), (x - 12, y + 5, 24, 9))
+        for k in range(3):
+            by = y + 8 - ((t / 160 + k * 3) % 9)
+            pygame.draw.circle(s, (170, 245, 150), (int(x - 7 + k * 7), int(by)), 2)
+        pygame.draw.polygon(s, (30, 110, 120), [(x - 9, y + 8), (x + 9, y + 8), (x + 5, y - 6), (x - 5, y - 6)])
+        pygame.draw.line(s, (176, 130, 60), (x - 7, y + 1), (x + 7, y + 1), 2)
+        pygame.draw.circle(s, (238, 204, 164), (int(x), int(y - 10)), 6)
+        pygame.draw.circle(s, (40, 30, 30), (int(x - 2), int(y - 10)), 1)
+        pygame.draw.circle(s, (40, 30, 30), (int(x + 2), int(y - 10)), 1)
+        pygame.draw.ellipse(s, (46, 120, 70), (x - 12, y - 17, 24, 7))
+        pygame.draw.polygon(s, (46, 120, 70), [(x - 6, y - 15), (x + 6, y - 15), (x + 1, y - 27)])
+        fx, fy = x + 13, y - 8 - (4 if flash > 0 else 0)
+        pygame.draw.line(s, (238, 204, 164), (x + 5, y - 1), (fx, fy), 3)
+        pygame.draw.circle(s, (60, 40, 30), (int(fx), int(fy - 3)), 7)
+        pygame.draw.circle(s, (120, 230, 130), (int(fx), int(fy - 3)), 5)
+        pygame.draw.rect(s, (200, 200, 210), (fx - 2, fy - 12, 4, 6))
+        pygame.draw.rect(s, (150, 100, 60), (fx - 2, fy - 14, 4, 3))
+
+
 # =============================================================================
 # BACKGROUND ART (pre-rendered once)
 # =============================================================================
@@ -2162,23 +2619,23 @@ class Game:
         n = len(self.tower_classes)
         cols, gap = 2, 6
         rows = (n + cols - 1) // cols
-        top, bottom = 164, 332
+        top, bottom = 98, 324
         cw = (w - gap) // cols
         ch = min(58, (bottom - top - gap * (rows - 1)) // rows)
         self.card_rects = [pygame.Rect(x0 + (i % cols) * (cw + gap), top + (i // cols) * (ch + gap), cw, ch)
                            for i in range(n)]
         self.icon_size = min(48, ch - 8)
-        self.panel_rect = p = pygame.Rect(x0, 340, w, 258)
+        self.panel_rect = p = pygame.Rect(x0, 332, w, 266)
         self.up_rects = [pygame.Rect(p.x + 6, p.y + 78, p.w - 12, 68),
                          pygame.Rect(p.x + 6, p.y + 150, p.w - 12, 68)]
         self.sell_rect = pygame.Rect(p.right - 96, p.bottom - 34, 90, 26)
         self.start_rect = pygame.Rect(x0, 604, w, 40)
-        half = (w - 8) // 2
-        self.speed_rect = pygame.Rect(x0, 652, half, 34)
-        self.pause_rect = pygame.Rect(x0 + half + 8, 652, half, 34)
+        third = (w - 16) // 3
+        self.speed_rect = pygame.Rect(x0, 652, third, 34)
+        self.pause_rect = pygame.Rect(x0 + third + 8, 652, third, 34)
         self.restart_rect = pygame.Rect(SCREEN_W // 2 - 205, 400, 190, 52)
         self.go_menu_rect = pygame.Rect(SCREEN_W // 2 + 15, 400, 190, 52)
-        self.menu_btn_rect = pygame.Rect(SCREEN_W - 84, 48, 70, 26)
+        self.menu_btn_rect = pygame.Rect(x0 + 2 * (third + 8), 652, third, 34)
         n, cw, gap = len(MAPS), 340, 30
         x_start = (SCREEN_W - (n * cw + (n - 1) * gap)) // 2
         self.map_rects = [pygame.Rect(x_start + i * (cw + gap), 190, cw, 400) for i in range(n)]
@@ -2529,17 +2986,17 @@ class Game:
         s.blit(self.sidebar_bg, (SIDEBAR_X, 0))
         cx = SIDEBAR_X + SIDEBAR_W // 2
         draw_text(s, "REALM DEFENDERS", 24, GOLD, (cx, 12), "midtop", True, True)
-        lx = SIDEBAR_X + 34
-        draw_coin(s, lx, 62)
-        draw_text(s, f"{self.money}", 20, (250, 235, 190), (lx + 20, 50), "topleft", True, True)
-        draw_heart(s, lx, 92)
-        draw_text(s, f"{self.lives}", 20, (250, 235, 190), (lx + 20, 80), "topleft", True, True)
-        draw_banner_icon(s, lx, 122)
-        draw_text(s, f"Wave {self.wave}", 20, (250, 235, 190), (lx + 20, 110), "topleft", True, True)
-        draw_text(s, "~ Towers ~", 15, GOLD, (cx, 144), "midtop", True, True)
+        y = 52
+        draw_coin(s, SIDEBAR_X + 28, y + 11)
+        draw_text(s, f"{self.money}", 18, (250, 235, 190), (SIDEBAR_X + 42, y), "topleft", True, True)
+        draw_heart(s, SIDEBAR_X + 128, y + 8)
+        draw_text(s, f"{self.lives}", 18, (250, 235, 190), (SIDEBAR_X + 142, y), "topleft", True, True)
+        draw_banner_icon(s, SIDEBAR_X + 206, y + 11)
+        draw_text(s, f"Wave {self.wave}", 18, (250, 235, 190), (SIDEBAR_X + 220, y), "topleft", True, True)
+        draw_text(s, "~ Towers ~", 14, GOLD, (cx, 77), "midtop", True, True)
         sure = self.menu_confirm > 0
         self._button(s, self.menu_btn_rect, "Sure?" if sure else "Menu", True,
-                     self.menu_btn_rect.collidepoint(mouse), (170, 80, 50) if sure else (140, 100, 50), 13)
+                     self.menu_btn_rect.collidepoint(mouse), (170, 80, 50) if sure else (140, 100, 50), 15)
 
         hover_idx = None
         for i, cls in enumerate(self.tower_classes):
